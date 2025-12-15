@@ -1,0 +1,1772 @@
+154,475d153
+< /**********************/
+< /* I TENSOR INVERSION */
+< /**********************/
+< void invertI(double *Imat, double *invImat)
+< {
+< 	int N = 3, INFO;
+< 	for (int i = 0; i < N*N; ++i)
+< 		invImat[i] = Imat[i];
+< #ifdef __MAGMA__
+< 	TESTING_CHECK(magma_init());
+< 	TESTING_CHECK(magma_dpotrf(MagmaLower, N, invImat, N, &INFO));
+< 	TESTING_CHECK(magma_dpotri(MagmaLower, N, invImat, N, &INFO));
+< 	TESTING_CHECK(magma_finalize());
+< #else
+< 	char UPLO = 'L';
+< 	dpotrf_(&UPLO, &N, invImat, &N, &INFO);
+< 	dpotri_(&UPLO, &N, invImat, &N, &INFO);
+< #endif
+< 
+< 	for (int i = 0; i < N; ++i)
+< 	{
+< 		for (int j = i + 1; j < N; ++j)
+< 		{
+< 			if (fabs(invImat[j * N + i] / invImat[i * N + i]) < 1.0e-10)
+< 				invImat[j * N + i] = 0.0;
+< 			invImat[i * N + j] = invImat[j * N + i];
+< 		}
+< 	}
+< 
+< #ifdef DEBUG
+< 	std::cout << "****** void invertI(vectorOfDoubles Imat, double *invImat) routine debugging info:\n\n";
+< 	std::cout << "I tensor\n";
+< 	for (int i = 0; i < N; ++i)
+< 	{
+< 		for (int j = 0; j < N; ++j)
+< 			std::cout << Imat[i * N + j] << "\t";
+< 		std::cout << "\n";
+< 	}
+< 	std::cout << "\nInverse of I tensor\n";
+< 	for (int i = 0; i < N; ++i)
+< 	{
+< 		for (int j = 0; j < N; ++j)
+< 			std::cout << invImat[i * N + j] << "\t";
+< 		std::cout << "\n";
+< 	}
+< 	std::cout << "\n****** end of debugging info\n\n";
+< #endif
+< 	return;
+< }
+< 
+< /*********************/
+< /* gA MULTIPLICATION */
+< /*********************/
+< void multGA(int nq, double *G, double *A, double *GA)
+< {
+< #ifdef __GPU__
+< 	TESTING_CHECK( magma_init() );
+< 
+< 	double *d_G;  // mxk matrix g on the device
+< 	double *d_A;  // kxn matrix A on the device
+< 	double *d_GA; // mxn matrix gA on the device
+< 
+< 	// create queue
+< 	magma_device_t device;
+< 	magma_getdevice(&device);
+< 	magma_queue_t queue;
+< 	magma_queue_create(device, &queue);
+< 
+< 	// allocate matrix and vectors on the device
+< 	TESTING_CHECK(magma_dmalloc(&d_G,  nq * nq)); // device memory for g
+< 	TESTING_CHECK(magma_dmalloc(&d_A,  nq * 3));  // device memory for A
+< 	TESTING_CHECK(magma_dmalloc(&d_GA, nq * 3));  // device memory for gA
+< 
+< 	// copy data from host to device
+< 	cudaMemcpy(d_G,  G,  nq * nq * sizeof(double), cudaMemcpyHostToDevice);
+< 	cudaMemcpy(d_A,  A,  nq *  3 * sizeof(double), cudaMemcpyHostToDevice);
+< 	cudaMemcpy(d_GA, GA, nq *  3 * sizeof(double), cudaMemcpyHostToDevice);
+< 
+< 	magma_dgemm(MagmaNoTrans, MagmaNoTrans, 3, nq, nq, 1.0, d_A, 3, d_G, nq, 0.0, d_GA, 3, queue);
+< 
+< 	// copy data from device to host
+< 	cudaMemcpy(GA, d_GA, nq * 3 * sizeof(double), cudaMemcpyDeviceToHost);
+< 
+< 	// free device memory
+< 	TESTING_CHECK(magma_free (d_G));
+< 	TESTING_CHECK(magma_free (d_A));
+< 	TESTING_CHECK(magma_free (d_GA));
+< 
+< 	TESTING_CHECK(magma_finalize()); // finalize Magma
+< #else // CPU CODE
+< 	char noTr= 'N';
+< 	int n = 3;
+< 	double alpha = 1.0;
+< 	double beta = 0.0;
+< 	dgemm_(&noTr, &noTr, &n, &nq, &nq, &alpha, A, &n, G, &nq, &beta, GA, &n);
+< #endif //__GPU__
+< 
+< #ifdef DEBUG
+< 	std::cout << "...............................................\n";
+< 	std::cout << "GPU calculated (magma_dgemm) gA matrix:\n";
+< 	std::cout.precision(4);
+< 	for(int i = 0; i < nq; ++i)
+< 	{
+< 		for(int j = 0; j < 3; j++)
+< 			std::cout << std::scientific << GA[i * 3 + j] << "\t";
+< 		std::cout << "\n";
+< 	}
+< 	std::cout << "...............................................\n";
+< #endif //DEBUG
+< 
+< 	return;
+< }
+< 
+< /***************************/
+< /* A^tr g A MULTIPLICATION */
+< /***************************/
+< // TODO: OPTIMIZATION BY COLLECTING THE multGA and multAGA IN ONE ROUTINE
+< //       TO REDUCE DATA TRAFFIC BEWTWEEN CPU AND GPU
+< void multAGA(int nq, double *A, double *GA, double *AtGA)
+< {
+< #ifdef __GPU__
+< 	TESTING_CHECK(magma_init ()); // initialize Magma
+< 
+< 	double *d_A;    // mxk matrix A on the device
+< 	double *d_GA;   // kxn matrix gA on the device
+< 	double *d_AtGA; // mxn matrix Atr g A on the device
+< 
+< 	double alpha = MAGMA_D_MAKE (1.0, 0.0); // alpha = 1
+< 	double beta = MAGMA_D_MAKE (0.0, 0.0);  // beta = 0
+< 
+< 	// create queue
+< 	magma_device_t device;
+< 	magma_getdevice(&device);
+< 	magma_queue_t queue;
+< 	magma_queue_create(device, &queue);
+< 
+< 	// allocate matrix and vectors on the device
+< 	TESTING_CHECK(magma_dmalloc(&d_A, nq * 3));   // device memory for A
+< 	TESTING_CHECK(magma_dmalloc(&d_GA, nq * 3));  // device memory for gA
+< 	TESTING_CHECK(magma_dmalloc(&d_AtGA, 3 * 3)); // device memory for Atr gA
+< 
+< 	// copy data from host to device
+< 	magma_dsetmatrix(3, nq, A, 3, d_A, 3, queue);      // copy A  -> d_Atr
+< 	magma_dsetmatrix(3, nq, GA, 3, d_GA, 3, queue);    // copy GA  -> d_GAtr
+< 	magma_dsetmatrix(3, 3, AtGA, 3, d_AtGA, 3, queue); // copy AtGA -> d_AtGA
+< 
+< 	magma_dgemm(MagmaNoTrans, MagmaTrans, 3, 3, nq, alpha, d_GA, 3, d_A, 3, beta, d_AtGA, 3, queue);
+< 
+< 	// copy data from device to host (this matrix is symmetric)
+< 	magma_dgetmatrix (3, 3, d_AtGA, 3, AtGA, 3, queue); // copy d_AtGA -> AtGA
+< 
+< 	// free device memory
+< 	TESTING_CHECK(magma_free (d_A));
+< 	TESTING_CHECK(magma_free (d_GA));
+< 	TESTING_CHECK(magma_free (d_AtGA));
+< 
+< 	TESTING_CHECK(magma_finalize ()); // finalize Magma
+< #else // CPU CODE
+< 	char tr = 'T', noTr= 'N';
+< 	int n = 3;
+< 	double alpha = 1.0;
+< 	double beta = 0.0;
+< 	dgemm_(&noTr, &tr, &n, &n, &nq, &alpha, GA, &n, A, &n, &beta, AtGA, &n);
+< #endif //__GPU__
+< 
+< #ifdef DEBUG
+< 	std::cout << "...............................................\n";
+< 	std::cout << "GPU calculated (magma_dgemm) Atr gA matrix:\n";
+< 	std::cout.precision(4);
+< 	for(int i = 0; i < 3; ++i)
+< 	{
+< 		for(int j=0; j < 3; j++) std::cout << std::scientific << AtGA[i * 3 + j] << "\t";
+< 		std::cout << "\n";
+< 	}
+< 	std::cout << "...............................................\n";
+< #endif //DEBUG
+< 
+< 	return;
+< }
+< 
+< /***********************************************/
+< /* BUILD THE LOWER BLOCK OF THE SMALL k MATRIX */
+< /***********************************************/
+< void buildSmallK_LB(int nq, int nkLB, double *invImat, double *AtGA, double *GA, double *Gmat, double *smallk_LB)
+< {
+< #ifdef __GPU__
+< 	dim3 threadsPerBlock, numBlocks;
+< 	double *d_smallkLB;
+< 	cudaMalloc(&d_smallkLB, nkLB * nkLB * sizeof(double));
+< 
+< 	// Zero out smallk	
+< 	threadsPerBlock.x = threadsPerBlock.y = TPB_2D;
+< 	numBlocks.x = 1 + nkLB / threadsPerBlock.x;
+< 	numBlocks.y = 1 + nkLB / threadsPerBlock.y;
+< 	gpu_zero_smallk<<<numBlocks, threadsPerBlock>>>(nkLB, d_smallkLB);
+< 
+< 	// Copy g
+< 	double *d_Gmat;
+< 	numBlocks.x = 1 + nq / threadsPerBlock.x;
+< 	numBlocks.y = 1 + nq / threadsPerBlock.y;
+< 	cudaMalloc(&d_Gmat, nq * nq * sizeof(double));
+< 	cudaMemcpy(d_Gmat, Gmat, nq * nq * sizeof(double), cudaMemcpyHostToDevice);
+< 	gpu_copy_g<<<numBlocks, threadsPerBlock>>>(3, nq, nkLB, d_smallkLB, d_Gmat);
+< 	cudaFree(d_Gmat);
+< 
+< 	// Copy gA and (A^tr g)
+< 	double *d_GA;
+< 	cudaMalloc(&d_GA, nq * 3 * sizeof(double));
+< 	cudaMemcpy(d_GA, GA, nq * 3 * sizeof(double), cudaMemcpyHostToDevice);
+< 	numBlocks.x = 1 + nq / threadsPerBlock.x;
+< 	numBlocks.y = 1 + 3 / threadsPerBlock.y;
+< 	gpu_copy_gA<<<numBlocks, threadsPerBlock>>>(0, nq, nkLB, d_smallkLB, d_GA);
+< 	cudaFree(d_GA);
+< 
+< 	// Copy [inv(I) + A^tr gA]
+< 	double *d_invImat, *d_AtGA;
+< 	cudaMalloc(&d_invImat, 3 * 3 * sizeof(double));
+< 	cudaMalloc(&d_AtGA, 3 * 3 * sizeof(double));
+< 	cudaMemcpy(d_invImat, invImat, 9 * sizeof(double), cudaMemcpyHostToDevice);
+< 	cudaMemcpy(d_AtGA, AtGA, 9 * sizeof(double), cudaMemcpyHostToDevice);
+< 	numBlocks.x = 1 + 3 / threadsPerBlock.x;
+< 	numBlocks.y = 1 + 3 / threadsPerBlock.y;
+< 	gpu_copy_invIAgA<<<numBlocks, threadsPerBlock>>>(0, nkLB, d_smallkLB, d_invImat, d_AtGA);
+< 	cudaFree(d_invImat);
+< 	cudaFree(d_AtGA);
+< 	
+< 	// Get the smallk from GPU
+< 	cudaMemcpy(smallk_LB, d_smallkLB, nkLB * nkLB * sizeof(double), cudaMemcpyDeviceToHost);
+< 	cudaFree(d_smallkLB);
+< 
+< #else // CPU code
+< 
+< 	// Zero out k
+< 	for (int r = 0; r < nkLB; ++r)
+< 	{
+< 		for (int c = 0; c < nkLB; ++c)
+< 			smallk_LB[r * nkLB + c] = 0.0;
+< 	}
+< 
+< 	// Copy g into k
+< 	for (int r = 0; r < nq; ++r)
+< 	{
+< 		for  (int c = r; c < nq; ++c)
+< 			smallk_LB[(r + 3) * nkLB + (c + 3)] = smallk_LB[(c + 3) * nkLB + (r + 3)] = Gmat[r * nq + c];
+< 	}
+< 	// Copy gA and (A^tr g) into k
+< 	for (int r = 0; r < nq; ++r)
+< 	{
+< 		for (int c = 0; c < 3; ++c)
+< 			smallk_LB[(r + 3) * nkLB + c] = smallk_LB[c * nkLB + (r + 3)] = -GA[r * 3 + c];
+< 	}
+< 
+< 	// Copy [inv(I) + A^tr gA] into k
+< 	for (int r = 0; r < 3; ++r)
+< 	{
+< 		for (int c = r; c < 3; ++c)
+< 			smallk_LB[r * nkLB + c] = smallk_LB[c * nkLB + r] = invImat[r * 3 + c] + AtGA[r * 3 + c];
+< 	}
+< #endif
+< 	return;
+< }
+< 
+< /****************************************************/
+< /* BUILD THE FULL MATRIX OF EIGENVECTORS OF SMALL k */
+< /****************************************************/
+< void buildFullSmallKEigenvectors(int nq, double *Kmat, int nkLB, double *smallk_LB, int nk, double *smallk)
+< {
+< #ifdef __GPU__
+< 	dim3 threadsPerBlock, numBlocks;
+< 
+< 	double *dSmallk;
+< 	cudaMalloc(&dSmallk, nk * nk * sizeof(double));
+< 
+< 	// Zero out smallk	
+< 	threadsPerBlock.x = threadsPerBlock.y = TPB_2D;
+< 	numBlocks.x = 1 + nk / threadsPerBlock.x;
+< 	numBlocks.y = 1 + nk / threadsPerBlock.y;
+< 	gpu_zero_smallk<<<numBlocks, threadsPerBlock>>>(nk, dSmallk);
+< 
+< 	// Copy Kmat to the upper nq x nq block of small k
+< 	double *dKmat;
+< 	cudaMalloc(&dKmat, nq * nq * sizeof(double));
+< 	cudaMemcpy(dKmat, Kmat, nq * nq * sizeof(double), cudaMemcpyHostToDevice);
+< 	numBlocks.x = 1 + nq / threadsPerBlock.x;
+< 	numBlocks.y = 1 + nq / threadsPerBlock.y;
+< 	gpu_copy_K<<<numBlocks, threadsPerBlock>>>(nq, nk, dSmallk, dKmat);
+< 	cudaFree(dKmat);
+< 
+< 	// Copy smallk_LB to lower (nq + 3) x (nq + 3) block of small k
+< 	double *dSmallkLB;
+< 	cudaMalloc(&dSmallkLB, nkLB * nkLB * sizeof(double));
+< 	cudaMemcpy(dSmallkLB, smallk_LB, nkLB * nkLB * sizeof(double), cudaMemcpyHostToDevice);
+< 	numBlocks.x = 1 + nkLB / threadsPerBlock.x;
+< 	numBlocks.y = 1 + nkLB / threadsPerBlock.y;
+< 	gpu_copy_smallkLB<<<numBlocks, threadsPerBlock>>>(nq, nkLB, nk, dSmallk, dSmallkLB);
+< 	cudaFree(dSmallkLB);
+< 
+< 	cudaMemcpy(smallk, dSmallk, nk * nk * sizeof(double), cudaMemcpyDeviceToHost);
+< 
+< 	// Free memory
+< 	cudaFree(dSmallk);
+< #else // END GPU CODE
+< 	// Zero out smallk
+< 	for (int i = 0; i < nk * nk; ++i) smallk[i] = 0.0;
+< 
+< 	// Copy Kmat to the upper nq x nq block of small k
+< 	for (int i = 0; i < nq; ++i)
+< 	{
+< 		for (int j = 0; j < nq; ++j)
+< 			smallk[i * nk + j] = Kmat[i * nq + j];
+< 	}
+< 
+< 	// Copy smallk_LB to lower (nq + 3) x (nq + 3) block of small k
+< 	for (int i = 0; i < nkLB; ++i)
+< 	{
+< 		for (int j = 0; j < nkLB; ++j)
+< 			smallk[(i + nq) * nk + (j + nq)] = smallk_LB[i * nkLB + j];
+< 	}
+< #endif // END CPU CODE
+< 	return;
+< }
+< 
+730,1010d407
+< /*****************************/
+< /* INVERSE OF SMALL u MATRIX */
+< /*****************************/
+< // u^-1 =  smallk^tr * sqrt(1/lambda) * sqrt(kB T)
+< void buildInvSmallu(int nk,  double sqkBT, double *lambda, double *smallk, double *invsmallu)
+< {
+< #ifdef __GPU__
+< 	dim3 threadsPerBlock, numBlocks;
+< 	threadsPerBlock.x = threadsPerBlock.y = TPB_2D;
+< 	numBlocks.x = 1 + nk / threadsPerBlock.x;
+< 	numBlocks.y = 1 + nk / threadsPerBlock.y;
+< 
+< 	double *d_sqrtLambda, *d_smallk, *d_smallu;
+< 
+< 	// Build the sqrt of the inverse of the eigenvalues
+< 
+< 	cudaMalloc(&d_sqrtLambda, nk * sizeof(double));
+< 	cudaMemcpy(d_sqrtLambda, lambda, nk * sizeof(double), cudaMemcpyHostToDevice);
+< 
+< 	gpu_sqrt_inv_v<<<1 + nk / TPB_1D, TPB_1D>>>(nk, d_sqrtLambda);
+< 
+< 	// calculate inverse of small u 
+< 
+< 	cudaMalloc(&d_smallk, nk * nk * sizeof(double));
+< 	cudaMemcpy(d_smallk, smallk, nk * nk * sizeof(double), cudaMemcpyHostToDevice);
+< 
+< 	cudaMalloc(&d_smallu, nk * nk * sizeof(double));
+< 	gpu_Btr_times_diagA<<<numBlocks, threadsPerBlock>>>(nk, sqkBT, d_smallk, d_sqrtLambda, d_smallu);
+< 
+< 	cudaMemcpy(invsmallu, d_smallu, nk * nk * sizeof(double), cudaMemcpyDeviceToHost);
+< 
+< 	// free memory
+< 
+< 	cudaFree(d_sqrtLambda);
+< 	cudaFree(d_smallk);
+< 	cudaFree(d_smallu);
+< 
+< #else // CPU code
+< 	double *sqrtLambda = new double[nk];
+< 
+< 	// Build the sqrt of the inverse of the eigenvalues
+< 
+< 	for (int i = 0; i < nk; ++i)
+< 		sqrtLambda[i] = 1.0 / sqrt(lambda[i]);
+< 
+< 	// calculate inverse of small u 
+< 
+< 	for (int i = 0; i < nk; ++i)
+< 	{
+< 		for (int j = 0; j < nk; ++j)
+< 			invsmallu[i * nk + j] = sqkBT * smallk[j * nk + i] * sqrtLambda[i]; //AP:21-04-20 changed smallu with invsmallu//
+< 	}
+< 
+< 	// free memory
+< 
+< 	delete[] sqrtLambda;
+< 
+< #endif // GPU
+< 	return;
+< }
+< 
+< /********************/
+< /* OMEGA INT MATRIX */
+< /********************/
+< void buildOmegaInt(int nq, int nk, double kBT, double *smallu, double *omegaInt)
+< {
+< //	TODO: IS GPU CODE REALLY NECESSARY HERE?
+< //#ifdef __GPU__
+< 
+< //#else // CPU code
+< 	for (int i = 0; i < 3; ++i)
+< 	{
+< 		for (int j = 0; j < nk; ++j)
+< 			omegaInt[i * nk + j] = -kBT * smallu[(nq + i) * nk + j];
+< 	}
+< //#endif // GPU
+< 	return;
+< }
+< 
+< /******************/
+< /* OMEGA X MATRIX */
+< /******************/
+< void buildOmegaX(int nq, int nk, int nf, double kBT, double *smallu, double *rcFriction, magmaDoubleComplex *omegaX)
+< {
+< #ifdef __GPU__
+< 	TESTING_CHECK(magma_init());
+< 
+< 	// create queue
+< 	magma_device_t device;
+< 	magma_getdevice(&device);
+< 	magma_queue_t queue;
+< 	magma_queue_create(device, &queue);
+< 
+< 	// Allocate space for matrix B
+< 	double *d_Bmat;
+< 	cudaMalloc(&d_Bmat, nk * nk * sizeof(double));
+< 
+< 	// Copy friction to device
+< 
+< 	double *d_friction;
+< 	cudaMalloc(&d_friction, nf * nf * sizeof(double));
+< 	cudaMemcpy(d_friction, rcFriction, nf * nf * sizeof(double), cudaMemcpyHostToDevice);
+< 
+< 	// Fill Bmat on the device
+< 	
+< 	dim3 threadsPerBlock, numBlocks;
+< 	threadsPerBlock.x = threadsPerBlock.y = TPB_2D;
+< 	numBlocks.x = 1 + nk / threadsPerBlock.x;
+< 	numBlocks.y = 1 + nk / threadsPerBlock.y;
+< 	gpu_build_Bmat_tr<<<numBlocks, threadsPerBlock>>>(nq, nk, nf, kBT, d_friction, d_Bmat);
+< 
+< 	cudaFree(d_friction);
+< 
+< 	// Copy u to device
+< 
+< 	double *d_smallu;
+< 	TESTING_CHECK(magma_dmalloc(&d_smallu, nk * nk));
+< 	magma_dsetmatrix(nk, nk, smallu, nk, d_smallu, nk, queue);
+< 
+< 	// Go with multiplications!
+< 	// WARNING: Bmat will be destroyed and contain omegaX
+< 
+< 	double *d_tmp;
+< 	TESTING_CHECK(magma_dmalloc(&d_tmp, nk * nk));
+< 
+< 	double alpha = 1.0, beta = 0.0;
+< 
+< 	// u^tr B^tr
+< 	magma_dgemm(MagmaNoTrans, MagmaNoTrans, nk, nk, nk, alpha, d_smallu, nk, d_Bmat, nk, beta, d_tmp, nk, queue);
+< 	// u^tr B^tr u
+< 	magma_dgemm(MagmaNoTrans, MagmaTrans, nk, nk, nk, alpha, d_tmp, nk, d_smallu, nk, beta, d_Bmat, nk, queue);
+< 
+< 	// free device memory
+< 	magma_free(d_smallu);
+< 	magma_free (d_tmp);
+< 
+< 	// Allocate complex matrix on device -- STORE COLUMN WISE!
+< 	magmaDoubleComplex *dOmegaX;
+< 	TESTING_CHECK(magma_zmalloc(&dOmegaX, nk * nk));
+< 	gpu_RealToComplex<<<numBlocks, threadsPerBlock>>>(nk, d_Bmat, dOmegaX);
+< 
+< 	// copy data from device to host
+< 	magma_zgetmatrix(nk, nk, dOmegaX, nk, omegaX, nk, queue);
+< 
+< 	// free device memory
+< 	TESTING_CHECK(magma_free(d_Bmat));
+< 	TESTING_CHECK(magma_free(dOmegaX));
+< 
+< 	// finalize MAGMA
+< 	TESTING_CHECK(magma_finalize());
+< 
+< #else // CPU CODE
+< 	// Allocate space for matrix B
+< 	double *Bmat = new double [nk * nk];
+< 
+< 	// Fill Bmat
+< 	
+< 	for (int r = 0; r < nk; ++r)
+< 	{
+< 		for (int c = 0; c < nk; ++c)
+< 		{
+< 			if (r >= nq && c >= nq)
+< 				Bmat[r * nk + c] = kBT * rcFriction[(r - nq) * nf + (c - nq)];
+< 			else if ((r < nq && c < (3 + nq)) || (r < (3 + nq) && c < nq))
+< 				Bmat[r * nk + c]  = 0.0;
+< 			else if (r < nq && c >= (3 + nq))
+< 				Bmat[r * nk + c] = (r == (c - 3 - nq)) ?  -kBT : 0.0;
+< 			else if (r >= (3 + nq) && c < nq)
+< 				Bmat[r * nk + c] = ((r - 3 - nq) == c) ?  kBT : 0.0;
+< 			else
+< 				; // do nothing (anyway, there should be no excluded cases)
+< 		}
+< 	}
+< 
+< #ifdef DEBUG
+< 	// output J matrix and eigenvalues
+< 	std::ofstream f_J;
+< 	f_J.open("J_matrix.dat", std::ios::out);
+< 	int nj = 3+nk;
+< 	double mult = 1.0;//e-20;
+< 	// NOTE: J is built, here, transposed in order to use the lacpak routine (FORTRAN ordering transposed wrt C ordering)
+< 	F77complex *JJ = new F77complex[nj * nj];
+< 	for (int ir = 0; ir < (3 + nk); ++ir)
+< 	{
+< 		for (int ic = 0; ic < (3 + nk); ++ic)
+< 		{
+< 			if (ir < 3)
+< 			{
+< 				f_J << std::scientific << std::setprecision(16) <<((ir == 0 && ic == 3+nq) ?  -kBT : ((ir == 1 && ic == 3+nq+1) ? -kBT : ((ir == 2 && ic == 3+nq+2) ? -kBT : 0.0))) << "\t";
+< 				JJ[ir * nj + ic].r = ((ir == 0 && ic == 3+nq) ?  mult * kBT : ((ir == 1 && ic == 3+nq+1) ? mult * kBT : ((ir == 2 && ic == 3+nq+2) ? mult * kBT : 0.0)));
+< 				JJ[ir * nj + ic].i = 0.0;
+< 			}
+< 			else if (ir >= 3 && ic < 3)
+< 			{
+< 				f_J << std::scientific << std::setprecision(16) <<((ic == 0 && ir == 3+nq) ?   kBT : ((ic == 1 && ir == 3+nq+1) ?  kBT : ((ic == 2 && ir == 3+nq+2) ?  kBT : 0.0))) << "\t";
+< 				JJ[ir * nj + ic].r = ((ic == 0 && ir == 3+nq) ?   -mult * kBT : ((ic == 1 && ir == 3+nq+1) ?  -mult * kBT : ((ic == 2 && ir == 3+nq+2) ?  -mult * kBT : 0.0)));
+< 				JJ[ir * nj + ic].i = 0.0;
+< 			}
+< 			else
+< 			{
+< 				f_J << std::scientific << std::setprecision(16) << Bmat[(ir - 3) * nk + (ic - 3)] << "\t";
+< 				JJ[ir * nj + ic].r = mult * Bmat[(ic - 3) * nk + (ir - 3)];
+< 				JJ[ir * nj + ic].i = 0.0;
+< 			}
+< 		}
+< 		f_J << std::endl;
+< 	}
+< 	f_J.close();
+< 
+< 	char JOBVL = 'V';
+< 	char JOBVR = 'V';
+< 	F77complex* JJ_eigenvalues;
+< 	F77complex* JJ_Left_eigenvectors;
+< 	F77complex* JJ_Right_eigenvectors;
+< 	int JJ_lwork = 3 * nj;
+< 	F77complex* JJ_work;
+< 	double* JJ_rwork;
+< 	int JJ_info;	
+< 
+< 	JJ_eigenvalues        = (F77complex*) calloc(nj, sizeof(F77complex));
+< 	JJ_Left_eigenvectors  = (F77complex*) calloc(nj * nj, sizeof(F77complex));
+< 	JJ_Right_eigenvectors = (F77complex*) calloc(nj * nj, sizeof(F77complex));
+< 	JJ_work               = (F77complex*) calloc(JJ_lwork, sizeof(F77complex));
+< 	JJ_rwork              = (double*) calloc(2 * nj, sizeof(double));
+< 
+< 	zgeev_(&JOBVL, &JOBVR, &nj, JJ, &nj, JJ_eigenvalues, JJ_Left_eigenvectors, &nj, JJ_Right_eigenvectors, &nj, JJ_work, &JJ_lwork, JJ_rwork, &JJ_info);
+< 
+< 	f_J.open("J_eigenvalues.dat", std::ios::out);
+< 	for (int i = 0; i < nj; ++i)
+< 		f_J  << std::scientific << std::setprecision(16) << JJ_eigenvalues[i].r << "\t" << JJ_eigenvalues[i].i << std::endl;
+< 	f_J.close();
+< 
+< 	// The number of columns is twice nj since real and imaginary parts are printed as separate columns
+< 	f_J.open("J_right_eigenvectors.dat", std::ios::out);
+< 	for (int i = 0; i < nj; ++i)
+< 	{
+< 		for (int j = 0; j < nj; ++j)
+< 			f_J  << std::scientific << std::setprecision(16) << JJ_Right_eigenvectors[j * nj + i].r << "\t" << JJ_Right_eigenvectors[j * nj + i].i << "\t";
+< 		f_J << std::endl;
+< 	}
+< 	f_J.close();
+< 
+< 	f_J.open("J_left_eigenvectors.dat", std::ios::out);
+< 	for (int i = 0; i < nj; ++i)
+< 	{
+< 		for (int j = 0; j < nj; ++j)
+< 			f_J  << std::scientific << std::setprecision(16) << JJ_Left_eigenvectors[j * nj + i].r << "\t" << JJ_Left_eigenvectors[j * nj + i].i << "\t";
+< 		f_J << std::endl;
+< 	}
+< 	f_J.close();
+< 
+< #endif
+< 
+< 	// TODO: ADAPT CPU CODE BELOW TO HANDLE COMPLEX OMEGAX
+< 
+< 	// Go with multiplications!
+< 	// WARNING: Bmat will be destroyed and contain omegaX
+< 
+< //	double *tmp = new double[nk * nk];
+< //	
+< //	char noTr= 'N';
+< //	char Tr= 'T';
+< //	int m = nk;
+< //	int n = nk;
+< //	int k = nk;
+< //	double alpha = 1.0, beta = 0.0;
+< //	
+< //	// (Bu)^tr
+< //	dgemm_(&noTr, &noTr, &nk, &nk, &nk, &alpha, smallu, &nk, Bmat, &nk, &beta, tmp, &nk);
+< //	
+< //	// u^tr B^tr u
+< //	dgemm_(&noTr, &Tr, &nk, &nk, &nk, &alpha, tmp, &nk, smallu, &nk, &beta, omegaX, &nk);
+< //	
+< //	// free memory
+< //	free(tmp);
+< //	free(Bmat);
+< #endif //__GPU__
+< 	return;
+< }
+< 
+< 
+1411,1429d807
+< 	// Calculate A, g, and I matrices
+< 
+< 	t1 = high_resolution_clock::now(); // TIMER3: COMPUTATION AND DIAGONALIZATION OF THE ROTO-CONFORMATIONAL INERTIA TENSOR
+< 
+< 	double *Gmat, *Amat, *GA, *AtGA;
+< 	double *Imat = new double [9], *invImat = new double[9];
+< 
+< #ifdef __GPU__
+< 	TESTING_CHECK(magma_dmalloc_pinned (&Gmat, nq * nq)); // host mem. for G
+< 	TESTING_CHECK(magma_dmalloc_pinned (&Amat, nq * 3));  // host mem. for A
+< 	TESTING_CHECK(magma_dmalloc_pinned (&GA, nq * 3));    // host mem. for GA
+< 	TESTING_CHECK(magma_dmalloc_pinned (&AtGA, 3 * 3));   // host mem. for A^tr GA
+< #else
+< 	Gmat = new double [nq * nq];
+< 	Amat = new double [nq * 3];
+< 	GA   = new double [nq * 3];
+< 	AtGA = new double [3 * 3];
+< #endif
+< 
+1439,1607d816
+< 	buildAGI agi;
+< 	agi.setMol(&mol);
+< 	agi.buildMatrices();
+< 
+< 	agi.getAmat(Amat);
+< 	agi.getGmat(Gmat);
+< 	agi.getIten(Imat);
+< 
+< 	// Build ''support'' matrices
+< 	agi.getinvIten(invImat);
+< 	multGA(nq, Gmat, Amat, GA);
+< 	multAGA(nq, Amat, GA, AtGA);
+< 
+< 	// Build the smallk_LB matrix
+< 	int nk = 2 * nq + 3;
+< 	int nkLB = nq + 3;
+< 
+< 	double *smallk_LB;
+< #ifdef __GPU__
+< 	TESTING_CHECK(magma_dmalloc_pinned (&smallk_LB, nkLB * nkLB)); // host mem. for k
+< #else
+< 	smallk_LB = new double [nkLB * nkLB];
+< #endif
+< 
+< 	// Here, the reduced (3+nq)x(3+nq) lower block of small k is built and diagonalized
+< 	buildSmallK_LB(nq, nkLB, invImat, AtGA, GA, Gmat, smallk_LB);
+< 
+< #ifdef DEBUG
+< 	std::cout << "* Lower block of small k matrix:" << std::endl;
+< 	std::ofstream f_smallk;
+< 	f_smallk.open("small_k_LB.dat", std::ios::out);
+< 	for (int i = 0; i < nkLB; ++i)
+< 	{
+< 		for (int j = 0; j < nkLB; ++j)
+< 		{
+< 			std::cout     << std::scientific << std::setprecision(5)  << smallk_LB[i * nkLB + j] << "\t";
+< 			f_smallk << std::scientific << std::setprecision(12) << smallk_LB[i * nkLB + j] << "\t";
+< 		}
+< 		std::cout     << std::endl;
+< 		f_smallk << std::endl;
+< 	}
+< 	std::cout << "*****************" << std::endl;
+< 	f_smallk.close();
+< #endif
+< 	t2 = high_resolution_clock::now(); // TIMER3: COMPUTATION AND DIAGONALIZATION OF THE ROTO-CONFORMATIONAL INERTIA TENSOR
+< 
+< 	//AP:22-04-20 MOVED AND EDITED SOME LINES IN ORDER TO IMPLEMENT CPU PART FOR smallK DIAGONALIZATION//  *** BEGIN *** //
+< 
+< 	// Diagonalize lower block of small k matrix
+< 
+< #ifdef __GPU__
+< 	double *h_work ; // workspace
+< 	magma_int_t lwork ; // h_work size
+< 	magma_int_t *iwork ; // workspace
+< 	magma_int_t liwork ; // iwork size
+< 	magma_int_t info;
+< 	double *lambdaM; // lambda - vector of eigenvalues of the 'momenta'
+< 	TESTING_CHECK(magma_dmalloc_cpu (&lambdaM, nkLB)); // host memory for real
+< 	
+< 	// Query for workspace sizes
+< 	double aux_work [1];
+< 	magma_int_t aux_iwork [1];
+< 	magma_dsyevd (MagmaVec, MagmaLower, nkLB, smallk_LB, nkLB, lambdaM, aux_work, -1, aux_iwork, -1, &info); TESTING_CHECK(info);
+< 	lwork = (magma_int_t) aux_work [0];
+< 	liwork = aux_iwork [0];
+< 	iwork = (magma_int_t *) malloc (liwork * sizeof (magma_int_t));
+< 	TESTING_CHECK(magma_dmalloc_cpu (&h_work, lwork)); // host mem. for workspace
+< 
+< 	// Compute the eigenvalues and eigenvectors for a symmetric, real matrix
+< 	//////////////////////////////////////////////////////////////////////////////////////////////////////////
+< 	// IMPORTANT: since this is a FORTRAN-based routine, the problem here solved is: smallk_LB = W^tr Lambda W
+< 	//            The matrix of eigenvectors is V = W^tr
+< 	//////////////////////////////////////////////////////////////////////////////////////////////////////////
+< 	magma_dsyevd(MagmaVec, MagmaLower, nkLB, smallk_LB, nkLB, lambdaM, h_work, lwork, iwork, liwork, &info);
+< 	TESTING_CHECK(info);
+< #else // CPU code
+< 	int info, lwork;
+< 	double wkopt;
+< 	double *work;
+< 	double *lambdaM = new double[nkLB];
+< 	char UPLO = 'U', JOBZ = 'V';
+< 	lwork = -1;
+< 	dsyev_(&JOBZ, &UPLO, &nkLB, smallk_LB, &nkLB, lambdaM, &wkopt, &lwork, &info);
+< 	lwork = (int)wkopt;
+< 	work = (double*)malloc(lwork * sizeof(double));
+<         dsyev_(&JOBZ, &UPLO, &nkLB, smallk_LB, &nkLB, lambdaM, work, &lwork, &info);
+< #endif
+< 
+< 	t3 = high_resolution_clock::now(); // TIMER3
+< 	ms_double = t2 - t1;
+< 	timesFileStr << "Preparation of the roto-conformational inertia tensor: " << std::scientific << ms_double.count() * 1.0e-3 << " s\n";
+< 	ms_double = t3 - t2;
+< 	timesFileStr << "Calculation of eigvenvalues and eigenvectors of the roto-conformational inertia tensor: " << std::scientific << ms_double.count() *1.0e-3 << " s\n";
+< 
+< 
+< 	// Build the total array of eigenvalues lambda = [lambdaK lambdaM]
+< 	double *lambda = new double[nk];
+< 	for (int i = 0; i < nq; ++i) lambda[i] = lambdaK[i];
+< 	for (int i = 0; i < nkLB; ++i) lambda[nq + i] = fabs(lambdaM[i]);
+< 
+< 	// Build the total matrix of eigenvevtors:
+< 	//    | Kmat      0    |
+< 	// V= |                |
+< 	//    |  0   smallk_LB |
+< 	//
+< 	// TODO: for time/memory optimization: can Kmat and small_LB be used separately?
+< 	double *smallk;
+< #ifdef __GPU__
+< 	TESTING_CHECK(magma_dmalloc_pinned (&smallk, nk * nk)); // host mem. for k
+< #else
+< 	smallk = new double [nk * nk];
+< #endif
+< 	buildFullSmallKEigenvectors(nq, Kmat, nkLB, smallk_LB, nk, smallk);
+< 
+< 	// Free partial results
+< #ifdef __GPU__
+< 	TESTING_CHECK(magma_free_pinned(Kmat));
+< 	TESTING_CHECK(magma_free_pinned(smallk_LB));
+< 	TESTING_CHECK(magma_free_cpu(lambdaK));
+< 	TESTING_CHECK(magma_free_cpu(lambdaM));
+< 	//TESTING_CHECK(magma_free_cpu(h_work)); //AP:22-04-20//
+< #else
+< 	delete[] Kmat;
+< 	delete[] smallk_LB;
+< 	delete[] lambdaK;
+< 	delete[] lambdaM;
+< 	//delete[] work; //AP:22-04-20//
+< #endif
+< #ifdef DEBUG
+< 	std::cout << "| Eigenvalues of small k |" << std::endl;
+< 	for (int i = 0; i < nk; ++i)
+< 		std::cout << i+1 << "  " << lambda[i] << std::endl;
+< 	std::cout << "*****************" << std::endl;
+< 	std::cout << "* Eigenvectors of small k" << std::endl;
+< 	for(int i = 0; i < nk; ++i)
+< 	{
+< #ifdef __GPU__
+< 		for (int j = 0; j < nk; ++j)
+< 			std::cout << std::scientific << std::setprecision(6) << smallk[j * nk + i] << "\t"; // OUTPUT THE CORRECT ORDER TRANSPOSING smallk
+< 		std::cout << std::endl;
+< #else
+< 		for (int j = 0; j < nk; ++j)
+< 			std::cout << std::scientific << std::setprecision(6) << smallk[i * nk + j] << "\t"; // OUTPUT THE CORRECT ORDER TRANSPOSING smallk
+< 		std::cout << std::endl;
+< #endif
+< 	}
+< 	std::cout << "*****************" << std::endl;
+< #endif// DEBUG
+< /*	double dummysum;
+< 	for(int i = 0; i < nk; ++i)
+< 	{
+< 		for(int j = 0; j < nk; ++j)
+< 		{
+< 			dummysum = 0.0;
+< 			for(int k = 0; k < nk; ++k) dummysum += smallk[i * nk + k]*smallk[j * nk + k];
+< 			if (i==j)
+< 			{
+< 				std::cout << i+1 << "  " << j+1 << "  " << dummysum << std::endl;
+< 			}
+< 			else if(abs(dummysum)>1.0e-12) std::cout << i+1 << "  " << j+1 << "  " << dummysum << std::endl;
+< 		}
+< 	}*/
+< 	//AP:22-04-20 MOVED AND EDITED SOME LINES IN ORDER TO IMPLEMENT CPU PART FOR smallK DIAGONALIZATION//  *** END *** //
+< 
+< 	/////////////////////////////////////
+< 	/////////////////////////////////////
+< 	// Remeber: smallk = W = V^tr
+< 	/////////////////////////////////////
+< 	/////////////////////////////////////
+1660c869,871
+< 	for (int i = 0; i < nxA * nxA; ++i) Diff[i] = extFriction[i] * 1.0e15 * 1.660538921e-27;
+---
+> 	int rcdDim = nxA - 3;
+> 	double *RCDiff = new double[rcdDim * rcdDim];
+> 	for (int i = 0; i < nxA * nxA; ++i) Diff[i] = extFriction[i];/// * 1.0e15 * 1.660538921e-27; // MZ: 08-08-2022 *** Diff will be in Salem scaled units
+1683c894,895
+< 			std::cout  << Diff[(i + 3) * nx + (j + 3)] * kBT_factor << "\t";
+---
+> 			RCDiff[i * rcdDim + j] = Diff[(i + 3) * nx + (j + 3)] * kBT; // MZ: 08-08-2022 *** roto-conformational diffusion tensor stored in Salem scaled units 
+> 			std::cout  << Diff[(i + 3) * nx + (j + 3)] * kBT_factor  / (1.0e15 * 1.660538921e-27) << "\t"; // MZ: 08-08-2022 *** Output diffusion tensor in SI units
+1702,1715c914
+< 	// FREE SOME MEMORY!
+< #ifdef __GPU__
+< 	TESTING_CHECK(magma_free_pinned(Gmat));
+< 	TESTING_CHECK(magma_free_pinned(Amat));
+< 	TESTING_CHECK(magma_free_pinned(GA));
+< 	TESTING_CHECK(magma_free_pinned(AtGA));
+< 	TESTING_CHECK(magma_free_cpu(h_work));
+< #else
+< 	delete[] Gmat;
+< 	delete[] Amat;
+< 	delete[] GA;
+< 	delete[] AtGA;
+< 	free(work);
+< #endif
+---
+> 	// Copy parts of the diffusion tensor in matrices
+1717,1730c916,919
+< 	// u AND OMEGA MATRICES
+< #ifdef __GPU__
+< 	double *smallu, *omegaInt;
+< 	magmaDoubleComplex *omegaX;
+< 	TESTING_CHECK(magma_dmalloc_pinned (&smallu, nk * nk));
+< 	TESTING_CHECK(magma_dmalloc_pinned (&omegaInt, 3 * nk));
+< 	TESTING_CHECK(magma_zmalloc_pinned (&omegaX, nk * nk));
+< #else
+< 	double *smallu, *omegaInt;
+< 	F77complex *omegaX;
+< 	smallu = new double [nk * nk];
+< 	omegaInt = new double [3 * nk];
+< 	omegaX = new  F77complex [nk * nk];
+< #endif
+---
+> 	double *RDiff = new double[3 * 3];
+> 	RDiff[0 * 3 + 0] = RCDiff[0 * rcdDim + 0];	RDiff[0 * 3 + 1] = RCDiff[0 * rcdDim + 1];	RDiff[0 * 3 + 2] = RCDiff[0 * rcdDim + 2];
+> 	RDiff[1 * 3 + 0] = RCDiff[1 * rcdDim + 0];	RDiff[1 * 3 + 1] = RCDiff[1 * rcdDim + 1];	RDiff[1 * 3 + 2] = RCDiff[1 * rcdDim + 2];
+> 	RDiff[2 * 3 + 0] = RCDiff[2 * rcdDim + 0];	RDiff[2 * 3 + 1] = RCDiff[2 * rcdDim + 1];	RDiff[2 * 3 + 2] = RCDiff[2 * rcdDim + 2];
+1732,1737c921,961
+< 	// u MATRIX
+< 	t1 = high_resolution_clock::now(); // TIMER5: BUILDING OF SMALL u MATRIX
+< 	buildSmallu(nk, sqkBT, lambda, smallk, smallu);
+< 	t2 = high_resolution_clock::now(); // TIMER5
+< 	ms_double = t2 - t1;
+< 	timesFileStr << "Building of small u matrix: " << std::scientific << ms_double.count() *1.0e-3 << " s\n";
+---
+> 	int cdDim = rcdDim - 3;
+> 	double *CDiff = new double[cdDim * cdDim];
+> 	double *RCBlockDiff = new double [3 * cdDim];
+> 
+> 	for (int i = 0; i < cdDim; ++i)
+> 	{
+> 		for (int j = 0; j < cdDim; ++j)
+> 			CDiff[i * cdDim + j] = RCDiff[(i + 3) * rcdDim + (j + 3)];
+> 	}
+> 
+> 	for (int i = 0; i < 3; ++i)
+> 	{
+> 		for (int j = 0; j < cdDim; ++j)
+> 			RCBlockDiff[i * cdDim + j] = RCDiff[i * rcdDim + (j + 3)];
+> 	}
+> 
+> 	delete[] RCDiff;
+> 
+> 	// Diagonalize the rotational part of the diffusion tensor
+> 
+> 	magma_int_t infoK;
+> 	magma_int_t infoRDiff;
+> 	double *h_workRDiff;
+> 	magma_int_t lworkRDiff;
+> 	magma_int_t *iworkRDiff;
+> 	magma_int_t liworkRDiff;
+> 	double *lambdaRDiff;
+> 	TESTING_CHECK(magma_dmalloc_cpu(&lambdaRDiff, 3));
+> 
+> 	double *dRDiff;
+> 	TESTING_CHECK(magma_dmalloc(&dRDiff, 3 * 3));
+> 	cudaMemcpy(dRDiff, RDiff, 3 * 3 * sizeof(double), cudaMemcpyHostToDevice);
+> 
+> 	// Query for workspace sizes
+> 	double aux_workRDiff[1];
+> 	magma_int_t aux_iworkRDiff[1];
+> 	magma_dsyevd_gpu (MagmaVec, MagmaLower, 3, dRDiff, 3, lambdaRDiff, RDiff, 3, aux_workRDiff, -1, aux_iworkRDiff, -1, &infoK);
+> 	lworkRDiff = (magma_int_t) aux_workRDiff[0];
+> 	liworkRDiff = aux_iworkRDiff[0];
+> 	iworkRDiff = (magma_int_t *) malloc (liworkRDiff * sizeof (magma_int_t));
+> 	TESTING_CHECK(magma_dmalloc_cpu (&h_workRDiff, lworkRDiff)); // host mem. for workspace
+1738a963,1004
+> 	// Compute the eigenvalues and eigenvectors for a symmetric, real matrix
+> 	//////////////////////////////////////////////////////////////////////////////////////////////////////////
+> 	// IMPORTANT: since this is a FORTRAN-based routine, the problem here solved is: RDiff = W^tr Lambda W
+> 	//            The matrix of eigenvectors is E = W^tr
+> 	//////////////////////////////////////////////////////////////////////////////////////////////////////////
+> 	magma_dsyevd_gpu(MagmaVec, MagmaLower, 3, dRDiff, 3, lambdaRDiff, RDiff, 3, h_workRDiff, lworkRDiff, iworkRDiff, liworkRDiff, &infoRDiff);
+> 	TESTING_CHECK(infoRDiff);
+> 
+> 	cudaMemcpy(RDiff, dRDiff, 3 * 3 * sizeof(double), cudaMemcpyDeviceToHost);
+> 
+> 	// Free memory
+> 	free(iworkRDiff);
+> 	magma_free_cpu(h_workRDiff);
+> 
+> 	// Compute the square root of K matrix
+> 	
+> 	double *dKmat, *dSqrtLambdaK, *dSqLVt, *dSqKmat;
+> 	TESTING_CHECK(magma_dmalloc(&dKmat, nq * nq));    // device memory for Kmat (transposed of eigenvectors of K)
+> 	TESTING_CHECK(magma_dmalloc(&dSqLVt, nq * nq));   // device memory for lambdaK^1/2 V^t 
+> 	TESTING_CHECK(magma_dmalloc(&dSqKmat, nq * nq));  // device memory for Kmat^1/2
+> 	TESTING_CHECK(magma_dmalloc(&dSqrtLambdaK, nq));  // device memory for square root eigenvalues of K
+> 
+> 	cudaMemcpy(dKmat, Kmat, nq * nq * sizeof(double), cudaMemcpyHostToDevice);
+> 	cudaMemcpy(dSqrtLambdaK, lambdaK, nq * sizeof(double), cudaMemcpyHostToDevice);
+> 	
+> 	gpu_sqrt_v<<<1 + nq / TPB_1D, TPB_1D>>>(nq, dSqrtLambdaK);
+> 
+> 	threadsPerBlock.x = threadsPerBlock.y = TPB_2D;
+> 	numBlocks.x = 1 + nq / threadsPerBlock.x;
+> 	numBlocks.y = 1 + nq / threadsPerBlock.y;
+> 	double m = 1. / sqkBT;
+> 	gpu_diagA_times_B<<<numBlocks, threadsPerBlock>>>(nq, m, dSqrtLambdaK, dKmat, dSqLVt);
+> 
+> 	magma_dgemm(MagmaNoTrans, MagmaTrans, nq, nq, nq, 1.0, dSqLVt, nq, dKmat, nq, 0.0, dSqKmat, nq, queue);
+> 
+> 	double *sqKmat = new double[nq * nq];
+> 	cudaMemcpy(sqKmat, dSqKmat, nq * nq * sizeof(double), cudaMemcpyDeviceToHost);
+> 
+> 	TESTING_CHECK(magma_free (dKmat));
+> 	TESTING_CHECK(magma_free (dSqrtLambdaK));
+> 	TESTING_CHECK(magma_free (dSqLVt));
+> 
+1740,1743c1006,1008
+< 	std::cout << "*****************" << std::endl;
+< 	std::cout << "* Small u         "  << std::endl;
+< 	std::cout << "*****************" << std::endl;
+< 	for (int i = 0; i < nk; ++i)
+---
+> 	std::ofstream sqKmatFile;
+> 	sqKmatFile.open("sqKmat.dat", std::ios::out);
+> 	for (int i = 0; i < nq; ++i)
+1745,1747c1010,1012
+< 		for (int j = 0; j < nk; ++j)
+< 			std::cout << smallu[i * nk + j] << "\t";
+< 		std::cout << std::endl;
+---
+> 		for (int j = 0; j < nq; ++j)
+> 			sqKmatFile << std::scientific << std::setprecision(12) <<  sqKmat[i * nq + j] << "\t";
+> 		sqKmatFile << std::endl;
+1748a1014
+> 	sqKmatFile.close();
+1751,1757c1017
+< 	// FREE MORE MEMORY!
+< #ifdef __GPU__
+< 	TESTING_CHECK(magma_free_pinned(smallk));
+< #else
+< 	free(smallk);
+< #endif
+< 	delete[]lambda;
+---
+> 	// Build the new C,C and R,C blocks of the diffusion tensor
+1759c1019,1023
+< 	// OMEGA MATRICES
+---
+> 	double *dRCDiff, *dCDiff, *dRCDiff1, *dCDiff1;
+> 	TESTING_CHECK(magma_dmalloc(&dRCDiff,  3 * cdDim)); 
+> 	TESTING_CHECK(magma_dmalloc(&dRCDiff1, 3 * cdDim)); 
+> 	TESTING_CHECK(magma_dmalloc(&dCDiff,  cdDim * cdDim));
+> 	TESTING_CHECK(magma_dmalloc(&dCDiff1, cdDim * cdDim));
+1761,1767c1025,1030
+< 	/* Build wx and wint */
+< 	t1 = high_resolution_clock::now(); // TIMER6: BUILDING OF wx and wint matrices
+< 	buildOmegaInt(nq, nk, kBT, smallu, omegaInt);
+< 	buildOmegaX(nq, nk, nf, kBT, smallu, rcFriction, omegaX);
+< 	t2 = high_resolution_clock::now(); // TIMER6
+< 	ms_double = t2 - t1;
+< 	timesFileStr << "Building of wx and wint matrices: " << std::scientific << ms_double.count() *1.0e-3 << " s\n";
+---
+> 	cudaMemcpy(dRCDiff, RCBlockDiff, 3     * cdDim * sizeof(double), cudaMemcpyHostToDevice);
+> 	cudaMemcpy(dCDiff,  CDiff,       cdDim * cdDim * sizeof(double), cudaMemcpyHostToDevice);
+> 	
+> 	magma_dgemm(MagmaNoTrans, MagmaNoTrans, cdDim, 3, cdDim, 1.0, dSqKmat, cdDim, dRCDiff, cdDim, 0.0, dRCDiff1, cdDim, queue);
+> 	magma_dgemm(MagmaNoTrans, MagmaNoTrans, cdDim, cdDim, cdDim, 1.0, dSqKmat, cdDim, dCDiff, cdDim, 0.0, dCDiff1, cdDim, queue);
+> 	magma_dgemm(MagmaNoTrans, MagmaTrans, cdDim, cdDim, cdDim, 1.0, dCDiff1, cdDim, dSqKmat, cdDim, 0.0, dCDiff, cdDim, queue);
+1769,1776c1032,1040
+< 	/* free memory */
+< #ifdef __GPU__
+< 	TESTING_CHECK(magma_free_pinned(smallu));
+< 	TESTING_CHECK(magma_free_pinned(rcFriction));
+< #else
+< 	delete[](smallu);
+< 	delete[](rcFriction);
+< #endif
+---
+> 	
+> 	cudaMemcpy(RCBlockDiff, dRCDiff1, 3     * cdDim * sizeof(double), cudaMemcpyDeviceToHost);
+> 	cudaMemcpy(CDiff,       dCDiff,   cdDim * cdDim * sizeof(double), cudaMemcpyDeviceToHost);
+> 
+> 	TESTING_CHECK(magma_free (dRCDiff));
+> 	TESTING_CHECK(magma_free (dRCDiff1));
+> 	TESTING_CHECK(magma_free (dCDiff));
+> 	TESTING_CHECK(magma_free (dCDiff1));
+> 	TESTING_CHECK(magma_free (dSqKmat));
+1778d1041
+< 	/* print info for debug */
+1780,1784c1043,1044
+< 	std::cout << "*****************" << std::endl;
+< 	std::cout << "* OmegaInt" << std::endl;
+< 	std::cout << "*****************" << std::endl;
+< 	std::ofstream f_omInt;
+< 	f_omInt.open("omegaInt.dat", std::ios::out);
+---
+> 	std::ofstream RCDpFile;
+> 	RCDpFile.open("rcdiff_prime.dat", std::ios::out);
+1787,1793c1047,1049
+< 		for (int j = 0; j < nk; ++j)
+< 		{
+< 			std::cout    << omegaInt[i * nk + j] << "\t";
+< 			f_omInt << std::scientific << std::setprecision(16) <<omegaInt[i * nk + j] << "\t";
+< 		}
+< 		std::cout    << std::endl;
+< 		f_omInt << std::endl;
+---
+> 		for (int j = 0; j < cdDim; ++j)
+> 			RCDpFile << std::scientific << std::setprecision(12) <<  RCBlockDiff[i * cdDim + j] << "\t";
+> 		RCDpFile << std::endl;
+1795,1801c1051,1055
+< 	f_omInt.close();
+< 	std::cout << "*****************" << std::endl;
+< 	std::cout << "* OmegaX" << std::endl;
+< 	std::cout << "*****************" << std::endl;
+< 	std::ofstream f_omX;
+< 	f_omX.open("omegaX.dat", std::ios::out); // stores COLUMN-WISE
+< 	for (int i = 0; i < nk; ++i)
+---
+> 	RCDpFile.close();
+> 
+> 	std::ofstream CDpFile;
+> 	CDpFile.open("cdiff_prime.dat", std::ios::out);
+> 	for (int i = 0; i < cdDim; ++i)
+1803,1813c1057,1059
+< 		for (int j = 0; j < nk; ++j)
+< 		{
+< #ifdef __GPU__
+< 			std::cout  << MAGMA_Z_REAL(omegaX[i + j * nk]) << "\t";
+< 			f_omX << std::scientific << std::setprecision(16) << MAGMA_Z_REAL(omegaX[i + j * nk]) << "\t";
+< #else
+< 	//TODO: CPU CODE
+< #endif
+< 		}
+< 		std::cout  << std::endl;
+< 		f_omX << std::endl;
+---
+> 		for (int j = 0; j < cdDim; ++j)
+> 			CDpFile << std::scientific << std::setprecision(12) <<  CDiff[i * cdDim + j] << "\t";
+> 		CDpFile << std::endl;
+1815,1816c1061
+< 	f_omX.close();
+< 	std::cout << "*****************" << std::endl;
+---
+> 	CDpFile.close();
+1819,1849c1064,1110
+< 	/* Diagonalize wx */
+< 	t1 = high_resolution_clock::now(); // TIMER7: DIAGONALIZATION OF wx MATRIX
+< #ifdef __GPU__
+< 	magmaDoubleComplex *Leig, *Reig, *weig;
+< 	TESTING_CHECK(magma_zmalloc_pinned(&weig, nk));
+< 	TESTING_CHECK(magma_zmalloc_pinned(&Leig, nk * nk));
+< 	TESTING_CHECK(magma_zmalloc_pinned(&Reig, nk * nk));
+< 
+< 	int info_wx_diag;
+< 	magma_int_t lwork_wx_diag;
+< 	double *rwork_wx_diag = new double [2 * nk];
+< 	magmaDoubleComplex *work_wx_diag;
+< 
+< 	// Build Right eigenvectors such that wX * R = R * w
+< 	TESTING_CHECK(magma_dmalloc_cpu(&rwork_wx_diag, 2 * nk));
+< 	magma_zgeev(MagmaNoVec, MagmaVec, nk, omegaX, nk, weig, Leig, nk, Reig, nk, Leig, -1, rwork_wx_diag, &info_wx_diag); // work query
+< 	lwork_wx_diag = (magma_int_t)MAGMA_Z_REAL(Leig[0]);
+< 	TESTING_CHECK(magma_zmalloc_cpu(&work_wx_diag, lwork_wx_diag));
+< 	// NOTE: Since MAGMA is column-wise, Reig contains the transposed right eigenvectors
+< 	magma_zgeev(MagmaNoVec, MagmaVec, nk, omegaX, nk, weig, Leig, nk, Reig, nk, work_wx_diag, lwork_wx_diag, rwork_wx_diag, &info_wx_diag);
+< 
+< 	// Zero-out spurious parts in real- and imaginary-only eigenvalues
+< //double phase;
+< //for (int i = 0; i < nk; ++i)
+< //{
+< //	phase = fabs(atan2(MAGMA_Z_IMAG(weig[i]), MAGMA_Z_REAL(weig[i])));
+< //	if (fabs(phase) < 1e-10 || fabs(phase - M_PI) < 1.0e-10)
+< //		weig[i] = MAGMA_Z_MAKE(MAGMA_Z_REAL(weig[i]), 0.0);
+< //	else if (fabs(phase - 0.5 * M_PI) < 1.0e-10)
+< //		weig[i] = MAGMA_Z_MAKE(0.0, MAGMA_Z_IMAG(weig[i]));
+< //}
+---
+> 	// Diagonalize the conformational part of the diffusion tensor
+> 
+> 	magma_int_t infoCDiff;
+> 	double *h_workCDiff;
+> 	magma_int_t lworkCDiff;
+> 	magma_int_t *iworkCDiff;
+> 	magma_int_t liworkCDiff;
+> 	double *lambdaCDiff;
+> 	TESTING_CHECK(magma_dmalloc_cpu(&lambdaCDiff, cdDim));
+> 
+> 	TESTING_CHECK(magma_dmalloc(&dCDiff, cdDim * cdDim));
+> 	cudaMemcpy(dCDiff, CDiff, cdDim * cdDim * sizeof(double), cudaMemcpyHostToDevice);
+> 
+> 		// Query for workspace sizes
+> 	double aux_workCDiff[1];
+> 	magma_int_t aux_iworkCDiff[1];
+> 	magma_dsyevd_gpu (MagmaVec, MagmaLower, cdDim, dCDiff, cdDim, lambdaCDiff, CDiff, cdDim, aux_workCDiff, -1, aux_iworkCDiff, -1, &infoK);
+> 	lworkCDiff = (magma_int_t) aux_workCDiff[0];
+> 	liworkCDiff = aux_iworkCDiff[0];
+> 	iworkCDiff = (magma_int_t *) malloc (liworkCDiff * sizeof (magma_int_t));
+> 	TESTING_CHECK(magma_dmalloc_cpu (&h_workCDiff, lworkCDiff)); // host mem. for workspace
+> 	
+> 		// Compute the eigenvalues and eigenvectors for a symmetric, real matrix
+> 			//////////////////////////////////////////////////////////////////////////////////////////////////////////
+> 		// IMPORTANT: since this is a FORTRAN-based routine, the problem here solved is: CDiff = W^tr Lambda W
+> 		//            The matrix of eigenvectors is T = W^tr
+> 		//////////////////////////////////////////////////////////////////////////////////////////////////////////
+> 	magma_dsyevd_gpu(MagmaVec, MagmaLower, cdDim, dCDiff, cdDim, lambdaCDiff, CDiff, cdDim, h_workCDiff, lworkCDiff, iworkCDiff, liworkCDiff, &infoCDiff);
+> 	TESTING_CHECK(infoCDiff);
+> 
+> 	cudaMemcpy(CDiff, dCDiff, cdDim * cdDim * sizeof(double), cudaMemcpyDeviceToHost);
+> 
+> 	magma_free(dCDiff);
+> 	free(iworkCDiff);
+> 	magma_free_cpu(h_workCDiff);
+> 
+> 	// Calculate the new RC block of the diffusion tensor
+> 
+> 	TESTING_CHECK(magma_dmalloc(&dRCDiff, 3 * cdDim));
+> 	TESTING_CHECK(magma_dmalloc(&dRCDiff1, 3 * cdDim));
+> 	TESTING_CHECK(magma_dmalloc(&dCDiff, cdDim * cdDim));
+> 	
+> 	cudaMemcpy(dRDiff, RDiff, 3 * 3 * sizeof(double), cudaMemcpyHostToDevice);
+> 	cudaMemcpy(dRCDiff, RCBlockDiff, 3 * cdDim * sizeof(double), cudaMemcpyHostToDevice);
+> 	cudaMemcpy(dCDiff, CDiff, cdDim * cdDim * sizeof(double), cudaMemcpyHostToDevice);
+> 
+> 	magma_dgemm(MagmaTrans, MagmaNoTrans, cdDim, cdDim, cdDim, 1.0, dCDiff, cdDim, dRCDiff, cdDim, 0.0, dRCDiff1, cdDim, queue);
+1853,1865c1114,1116
+< 	std::ofstream wxInfo;
+< 	wxInfo.open("wx_eigval.dat", std::ios::out);
+< 	std::cout << "** Eigenvalues of wx matrix **" << std::endl;
+< 	for (int i = 0; i < nk; ++i)
+< 	{
+< 		std::cout << std::scientific << std::setprecision(16) << MAGMA_Z_REAL(weig[i]) << std::showpos << MAGMA_Z_IMAG(weig[i]) << "i" << std::endl;
+< 		wxInfo << std::scientific << std::setprecision(16) << MAGMA_Z_REAL(weig[i]) << std::showpos << MAGMA_Z_IMAG(weig[i]) << "i" << std::endl;
+< 	}
+< 	wxInfo.close();
+< 	std::cout << "******************************" << std::endl;
+< 	std::cout << "** Right Eigenvectors of wx matrix **" << std::endl; // Notice that Reig contains the transposed eigenvectors, thus they are accessed as [i + j * nk]
+< 	wxInfo.open("wx_right_eigvec.dat", std::ios::out);
+< 	for (int i = 0; i < nk; ++i)
+---
+> 	cudaMemcpy(RCBlockDiff, dRCDiff1, 3 * cdDim * sizeof(double), cudaMemcpyDeviceToHost);
+> 	RCDpFile.open("rcdiff_tmp.dat", std::ios::out);
+> 	for (int i = 0; i < 3; ++i)
+1867,1873c1118,1120
+< 		for (int j = 0; j < nk; ++j)
+< 		{
+< 			std::cout << std::scientific << std::setprecision(16) << MAGMA_Z_REAL(Reig[i + j * nk]) << std::showpos << MAGMA_Z_IMAG(Reig[i + j * nk]) << "i\t";
+< 			wxInfo << std::scientific << std::setprecision(16) << MAGMA_Z_REAL(Reig[i + j * nk]) << std::showpos << MAGMA_Z_IMAG(Reig[i + j * nk]) << "i\t";
+< 		}
+< 		std::cout << std::endl;
+< 		wxInfo << std::endl;
+---
+> 		for (int j = 0; j < cdDim; ++j)
+> 			RCDpFile << std::scientific << std::setprecision(12) <<  RCBlockDiff[i * cdDim + j] << "\t";
+> 		RCDpFile << std::endl;
+1875,1876c1122
+< 	wxInfo.close();
+< 	std::cout << "******************************" << std::endl;
+---
+> 	RCDpFile.close();
+1879,1886c1125,1127
+< 	TESTING_CHECK(magma_free_cpu(work_wx_diag));
+< 	TESTING_CHECK(magma_free_cpu(rwork_wx_diag));
+< #else // END GPU CODE
+< 	// TODO: CPU CODE
+< #endif // END CPU CODE
+< 	t2 = high_resolution_clock::now(); // TIMER7
+< 	ms_double = t2 - t1;
+< 	timesFileStr << "Diagonalization of wx matrix: " << std::scientific << ms_double.count() *1.0e-3 << " s\n";
+---
+> 	magma_dgemm(MagmaNoTrans, MagmaNoTrans, cdDim, 3, 3, 1.0, dRCDiff1, cdDim, dRDiff, 3, 0.0, dRCDiff, cdDim, queue);
+> 	
+> 	cudaMemcpy(RCBlockDiff, dRCDiff, 3 * cdDim * sizeof(double), cudaMemcpyDeviceToHost);
+1888,1901c1129,1141
+< 	/* Build w+ and w- */
+< 	t1 = high_resolution_clock::now(); // TIMER8: w+ AND w- FROM EIGENVECTORS AND EIGENVALUES OF wx
+< #ifdef __GPU__
+< 	// Copy omegaInt to GPU and store it COLUMN-WISE
+< 	double *dWintTmp;
+< 	TESTING_CHECK(magma_dmalloc(&dWintTmp, 3 * nk));
+< 	cudaMemcpy(dWintTmp, omegaInt, 3 * nk * sizeof(double), cudaMemcpyHostToDevice);
+< 	magmaDoubleComplex *dWint;
+< 	TESTING_CHECK(magma_zmalloc(&dWint, 3 * nk));
+< 	threadsPerBlock.x = threadsPerBlock.y = TPB_2D;
+< 	numBlocks.x = 1 +  3 / threadsPerBlock.x;
+< 	numBlocks.y = 1 + nk / threadsPerBlock.y;
+< 	gpu_makeColumnWise<<<numBlocks, threadsPerBlock>>>(nk, dWintTmp, dWint);
+< 	TESTING_CHECK(magma_free(dWintTmp));
+---
+> 	magma_free(&dRDiff);
+> 	magma_free(&dRCDiff);
+> 	magma_free(&dRCDiff1);
+> 	magma_free(&dCDiff);
+> 
+> 	// Output the diffusion tensor
+> 	RCDiff = new double[rcdDim * rcdDim];
+> 	for (int i = rcdDim * rcdDim - 1; i >= 0; --i)
+> 		RCDiff[i] = 0.0;
+> 
+> 	RCDiff[0 * rcdDim + 0] = lambdaRDiff[0];
+> 	RCDiff[1 * rcdDim + 1] = lambdaRDiff[1];
+> 	RCDiff[2 * rcdDim + 2] = lambdaRDiff[2];
+1903,1934c1143,1146
+< 	// Allocate memory for device matrices
+< 	magmaDoubleComplex *dLReig;
+< 	TESTING_CHECK(magma_zmalloc(&dLReig, nk * nk));
+< 
+< 	magmaDoubleComplex *dwmp;
+< 	TESTING_CHECK(magma_zmalloc(&dwmp, nk * 3));
+< 
+< 	// Build w- = wint Reig **** NOTE: STORED COLUMN WISE!
+< 	magmaDoubleComplex *wm;
+< 	TESTING_CHECK(magma_zmalloc_pinned(&wm, 3 * nk));
+< 	cudaMemcpy(dLReig, Reig, nk * nk * sizeof(magmaDoubleComplex), cudaMemcpyHostToDevice); // Direct copy to device of R^tr
+< 	magma_zgemm(MagmaNoTrans, MagmaNoTrans, 3, nk, nk, MAGMA_Z_ONE, dWint, 3, dLReig, nk, MAGMA_Z_ZERO, dwmp, 3, queue);
+< 	magma_zgetmatrix(nk, 3, dwmp, nk, wm, nk, queue); // collect wm on host
+< 
+< 	// Build w+ = wint * Leig^tr **** NOTE: STORED COLUMN WISE!
+< 	magmaDoubleComplex *wp;
+< 	TESTING_CHECK(magma_zmalloc_pinned(&wp, 3 * nk));
+< 	int *ipiv_invR = new int[nk];
+< 	magma_zgetrf_gpu(nk, nk, dLReig, nk, ipiv_invR, &info_wx_diag);// Build the Left eigenvectors defined as L = R^-1 such that LR = RL = 1; This will destroy Reig
+< 	lwork_wx_diag = nk * magma_get_zgetri_nb(nk);
+< 	magmaDoubleComplex *work_invR;
+< 	TESTING_CHECK(magma_zmalloc(&work_invR, lwork_wx_diag));
+< 	magma_zgetri_gpu(nk, dLReig, nk, ipiv_invR, work_invR, lwork_wx_diag, &info_wx_diag);
+< 	cudaMemcpy(Leig, dLReig, nk * nk * sizeof(magmaDoubleComplex), cudaMemcpyDeviceToHost);
+< 	magma_free(work_invR);
+< 	free(ipiv_invR);
+< 	magma_zgemm(MagmaNoTrans, MagmaTrans, 3, nk, nk, MAGMA_Z_ONE, dWint, 3, dLReig, nk, MAGMA_Z_ZERO, dwmp, 3, queue); // go with multiplication
+< 	magma_zgetmatrix(nk, 3, dwmp, nk, wp, nk, queue); // collect wp on host
+< #ifdef DEBUG
+< 	wxInfo.open("wx_left_eigvec.dat", std::ios::out);
+< 	std::cout << "** Left Eigenvectors of wx matrix (Left = Right^1) **" << std::endl; // Notice that Leig contains the transposed eigenvectors, thus they are accessed as [i + j * nk]
+< 	for (int i = 0; i < nk; ++i)
+---
+> 	for (int i = 0; i < cdDim; ++i)
+> 		RCDiff[(i + 3) * rcdDim + (i + 3)] = lambdaCDiff[i];
+> 
+> 	for (int i = 0; i < 3; ++i)
+1936c1148
+< 		for (int j = 0; j < nk; ++j)
+---
+> 		for (int j = 0; j < cdDim; ++j)
+1938,1939c1150,1151
+< 			std::cout << std::scientific << std::setprecision(16) << MAGMA_Z_REAL(Leig[i + j * nk]) << std::showpos << MAGMA_Z_IMAG(Leig[i + j * nk]) << "i\t";
+< 			wxInfo << std::scientific << std::setprecision(16) << MAGMA_Z_REAL(Leig[i + j * nk]) << std::showpos << MAGMA_Z_IMAG(Leig[i + j * nk]) << "i\t";
+---
+> 			RCDiff[i * rcdDim + (j + 3)] = RCBlockDiff[i * cdDim + j];
+> 			RCDiff[(j + 3) * rcdDim + i] = RCBlockDiff[i * cdDim + j];
+1941,1942d1152
+< 		std::cout << std::endl;
+< 		wxInfo << std::endl;
+1944,1948c1154,1158
+< 	wxInfo.close();
+< 	std::cout << "******************************" << std::endl;
+< 	std::cout << "** w- matrix **" << std::endl;
+< 	wxInfo.open("w-.dat", std::ios::out);
+< 	for (int i = 0; i < 3; ++i)
+---
+> 
+> #ifdef DEBUG
+> 	std::ofstream rcDiffFile;
+> 	rcDiffFile.open("rcdiff_z.dat", std::ios::out);
+> 	for (int i = 0; i < rcdDim; ++i)
+1950,1956c1160,1162
+< 		for (int j = 0; j < nk; ++j)
+< 		{
+< 			std::cout << MAGMA_Z_REAL(wm[i + 3 * j]) << std::showpos << MAGMA_Z_IMAG(wm[i + 3 * j]) << "i\t";
+< 			wxInfo << MAGMA_Z_REAL(wm[i + 3 * j]) << std::showpos << MAGMA_Z_IMAG(wm[i + 3 * j]) << "i\t";
+< 		}
+< 		std::cout << std::endl;
+< 		wxInfo << std::endl;
+---
+> 		for (int j = 0; j < rcdDim; ++j)
+> 			rcDiffFile << std::scientific << std::setprecision(12) <<  RCDiff[i * rcdDim + j] << "\t";
+> 		rcDiffFile << std::endl;
+1958,1962c1164,1168
+< 	wxInfo.close();
+< 	std::cout << "******************************" << std::endl;
+< 	std::cout << "** w+ matrix **" << std::endl;
+< 	wxInfo.open("w+.dat", std::ios::out);
+< 	for (int i = 0; i < 3; ++i)
+---
+> 	rcDiffFile.close();
+> 
+> 	std::ofstream EFile;
+> 	EFile.open("E.dat", std::ios::out);
+> 	for (int i = 0; i < 3; ++ i)
+1964,1970c1170,1172
+< 		for (int j = 0; j < nk; ++j)
+< 		{
+< 			std::cout << MAGMA_Z_REAL(wp[i  + 3 * j]) << std::showpos << MAGMA_Z_IMAG(wp[i  + 3 * j]) << "i\t";
+< 			wxInfo << MAGMA_Z_REAL(wp[i  + 3 * j]) << std::showpos << MAGMA_Z_IMAG(wp[i  + 3 * j]) << "i\t";
+< 		}
+< 		std::cout << std::endl;
+< 		wxInfo << std::endl;
+---
+> 		for (int j = 0; j < 3; ++j)
+> 			EFile << std::scientific << std::setprecision(12) << RDiff[i * 3 + j] << "\t";
+> 		EFile << std::endl;
+1972,1973c1174,1184
+< 	wxInfo.close();
+< 	std::cout << "******************************" << std::endl;
+---
+> 	EFile.close();
+> 
+> 	std::ofstream TFile;
+> 	TFile.open("T.dat", std::ios::out);
+> 	for (int i = 0; i < cdDim; ++ i)
+> 	{
+> 		for (int j = 0; j < cdDim; ++j)
+> 			TFile << std::scientific << std::setprecision(12) << CDiff[i * cdDim + j] << "\t";
+> 		TFile << std::endl;
+> 	}
+> 	TFile.close();
+1976,1982d1186
+< 	// Free memory
+< 	TESTING_CHECK(magma_free(dLReig));
+< 	TESTING_CHECK(magma_free(dwmp));
+< 	TESTING_CHECK(magma_free_pinned(Leig));
+< 	TESTING_CHECK(magma_free_pinned(Reig));
+< 	TESTING_CHECK(magma_free_pinned(omegaInt));
+< 	TESTING_CHECK(magma_free_pinned(omegaX));
+1984,1989c1188,1227
+< #else // END GPU CODE
+< 	// TODO: CPU CODE
+< #endif // END CPU CODE
+< 	t2 = high_resolution_clock::now(); // TIMER8
+< 	ms_double = t2 - t1;
+< 	timesFileStr << "Building of w+ and w-: " << std::scientific << ms_double.count() *1.0e-3 << " s\n";
+---
+> 
+> 	magma_int_t infoD;
+> 	double *h_workD;
+> 	magma_int_t lworkD;
+> 	magma_int_t *iworkD;
+> 	magma_int_t liworkD;
+> 	double *lambdaD;
+> 	TESTING_CHECK(magma_dmalloc_cpu(&lambdaD, rcdDim));
+> 
+> 	TESTING_CHECK(magma_dmalloc(&dRCDiff, rcdDim * rcdDim));
+> 	cudaMemcpy(dRCDiff, RCDiff, rcdDim * rcdDim * sizeof(double), cudaMemcpyHostToDevice);
+> 
+> 		// Query for workspace sizes
+> 	double aux_workD[1];
+> 	magma_int_t aux_iworkD[1];
+> 	magma_dsyevd_gpu (MagmaVec, MagmaLower, rcdDim, dRCDiff, rcdDim, lambdaD, RCDiff, rcdDim, aux_workD, -1, aux_iworkD, -1, &infoD);
+> 	lworkD = (magma_int_t) aux_workD[0];
+> 	liworkD = aux_iworkD[0];
+> 	iworkD = (magma_int_t *) malloc (liworkD * sizeof (magma_int_t));
+> 	TESTING_CHECK(magma_dmalloc_cpu (&h_workD, lworkD)); // host mem. for workspace
+> 	
+> 		// Compute the eigenvalues and eigenvectors for a symmetric, real matrix
+> 			//////////////////////////////////////////////////////////////////////////////////////////////////////////
+> 		// IMPORTANT: since this is a FORTRAN-based routine, the problem here solved is: CDiff = W^tr Lambda W
+> 		//            The matrix of eigenvectors is T = W^tr
+> 		//////////////////////////////////////////////////////////////////////////////////////////////////////////
+> 	magma_dsyevd_gpu(MagmaVec, MagmaLower, rcdDim, dRCDiff, rcdDim, lambdaD, RCDiff, rcdDim, h_workD, lworkD, iworkD, liworkD, &infoD);
+> 	TESTING_CHECK(infoD);
+> 
+> 	std::cout << std::endl << "EIGENVALUES OF FINAL RC DIFFUSION TENSOR 2" << std::endl << std::endl;
+> 	for (int i = 0; i < rcdDim; ++i)
+> 		std::cout << lambdaD[i] << std::endl;
+> 
+> 	magma_free(dRCDiff);
+> 	free(iworkD);
+> 	magma_free_cpu(h_workD);
+> 
+> #ifdef STOP_AT_DIFFUSION_TENSOR
+> 	exit(0);
+> #endif
+1995,2011d1232
+< #ifdef OUTPUT_D
+< 	fD2.open("D2.dat", std::ios::out);
+< 	fD4.open("D4.dat", std::ios::out);
+< 
+< 	fD2 << "# freq/fs^-1	D2xx	D2xy	D2xz	D2yx	D2yy	D2yz	D2zx	D2zy	D2zz" << std::endl;
+< 	fD4 << "# freq/fs^-1	";
+< 	fD4 << "D4xxxx	D4xxxy	D4xxxz	D4xxyx	D4xxyy	D4xxyz	D4xxzx	D4xxzy	D4xxzz	";
+< 	fD4 << "D4xyxx	D4xyxy	D4xyxz	D4xyyx	D4xyyy	D4xyyz	D4xyzx	D4xyzy	D4xyzz	";
+< 	fD4 << "D4xzxx	D4xzxy	D4xzxz	D4xzyx	D4xzyy	D4xzyz	D4xzzx	D4xzzy	D4xzzz	";
+< 	fD4 << "D4yxxx	D4yxxy	D4yxxz	D4yxyx	D4yxyy	D4yxyz	D4yxzx	D4yxzy	D4yxzz	";
+< 	fD4 << "D4yyxx	D4yyxy	D4yyxz	D4yyyx	D4yyyy	D4yyyz	D4yyzx	D4yyzy	D4yyzz	";
+< 	fD4 << "D4yzxx	D4yzxy	D4yzxz	D4yzyx	D4yzyy	D4yzyz	D4yzzx	D4yzzy	D4yzzz	";
+< 	fD4 << "D4zxxx	D4zxxy	D4zxxz	D4zxyx	D4zxyy	D4zxyz	D4zxzx	D4zxzy	D4zxzz	";
+< 	fD4 << "D4zyxx	D4zyxy	D4zyxz	D4zyyx	D4zyyy	D4zyyz	D4zyzx	D4zyzy	D4zyzz	";
+< 	fD4 << "D4zzxx	D4zzxy	D4zzxz	D4zzyx	D4zzyy	D4zzyz	D4zzzx	D4zzzy	D4zzzz	";
+< 	fD4 << std::endl;
+< #endif
+2111,2472d1331
+< 
+< #ifdef __GPU__
+< 	// Allocate tensors D2 and D4
+< 	magmaDoubleComplex *D2, *D4;
+< 	TESTING_CHECK(magma_zmalloc(&D2, 3 * 3));
+< 	TESTING_CHECK(magma_zmalloc(&D4, 3 * 3 * 3 * 3));
+< 
+< 	magmaDoubleComplex *hD2, *hD4, *hD4A, *hD4B;
+< 	TESTING_CHECK(magma_zmalloc_cpu(&hD2, 3 * 3));
+< 	TESTING_CHECK(magma_zmalloc_cpu(&hD4, 3 * 3 * 3 * 3));
+< 	TESTING_CHECK(magma_zmalloc_cpu(&hD4A, 1));
+< 	TESTING_CHECK(magma_zmalloc_cpu(&hD4B, 1));
+< 
+< 	magmaDoubleComplex *dD4pq, *hD4pq;
+< 	TESTING_CHECK(magma_zmalloc(&dD4pq, 3 * 3));
+< 	TESTING_CHECK(magma_zmalloc_cpu(&hD4pq, 3 * 3));
+< 
+< 	size_t D4_block_size = TPB_1D;
+< 	size_t D4_A_num_blocks = 1 + nk / TPB_1D;
+< 	size_t D4_B_num_blocks = 1 + ((nk*(nk-1))/2) / TPB_1D;
+< 	magmaDoubleComplex *dD4A = 0, *dD4B = 0;
+< 	cudaMalloc((void**)&dD4A, sizeof(magmaDoubleComplex) * (D4_A_num_blocks + 1));
+< 	cudaMalloc((void**)&dD4B, sizeof(magmaDoubleComplex) * (D4_B_num_blocks + 1));
+< 	int D4_smem_sz = D4_block_size * sizeof(magmaDoubleComplex);
+< 
+< 	// Allocate tensors R2, R4 and R
+< 	magmaDoubleComplex *R2, *R4, *Rs, *Js;
+< 	TESTING_CHECK(magma_zmalloc(&R2, dimM * dimM));
+< 	TESTING_CHECK(magma_zmalloc(&R4, dimM * dimM));
+< 	TESTING_CHECK(magma_zmalloc(&Rs, dimM * dimM));
+< 	TESTING_CHECK(magma_zmalloc_cpu(&Js, dimM * dimM));
+< 
+< 	// Allocate tmp array of dimension nk x 3
+< 	magmaDoubleComplex *tmpMatrix;
+< 	TESTING_CHECK(magma_zmalloc(&tmpMatrix, nk * 3));
+< 	magmaDoubleComplex *tmpMatrix2;
+< 	TESTING_CHECK(magma_zmalloc(&tmpMatrix2, nk * 3));
+< 
+< 	// Allocate some other arrays
+< 	magmaDoubleComplex *dmat1, *dmat2;
+< 	TESTING_CHECK(magma_zmalloc(&dmat1, 3 *  3));
+< 	TESTING_CHECK(magma_zmalloc(&dmat2, 3 * nk));
+< 
+< 	// Allocate arrays needed by MAGMA routines
+< 	magma_int_t *ipiv  = (magma_int_t *) malloc (nk   * sizeof(magma_int_t));
+< 	magma_int_t *ipivR = (magma_int_t *) malloc (dimM * sizeof(magma_int_t));
+< 
+< 	lwork = nk * magma_get_zgetri_nb(nk);
+< 	magmaDoubleComplex *dwork;
+< 	TESTING_CHECK(magma_zmalloc(&dwork, lwork));
+< 
+< 	magma_int_t lworkR = dimM * magma_get_zgetri_nb(dimM);
+< 	magmaDoubleComplex *dworkR;
+< 	TESTING_CHECK(magma_zmalloc(&dworkR, lworkR));
+< 
+< #else // END GPU
+< 	; // TODO: CPU CODE
+< #endif // END CPU
+< 
+< #ifdef __GPU__
+< 	if (ip.getRigidBody()) // No timers implemented for this part of the code
+< 	{
+< 		std::cout << std::endl << "************************************" << std::endl << "Performing RIGID BODY calculation" << std::endl << "************************************" << std::endl;
+< 		// 3. Build D2
+< 		hD2[0] = MAGMA_Z_MAKE(ip.getDxx(), 0.0);
+< 		hD2[1] = MAGMA_Z_MAKE(0.0,         0.0);
+< 		hD2[2] = MAGMA_Z_MAKE(0.0,         0.0);
+< 		hD2[3] = MAGMA_Z_MAKE(0.0,         0.0);
+< 		hD2[4] = MAGMA_Z_MAKE(ip.getDyy(), 0.0);
+< 		hD2[5] = MAGMA_Z_MAKE(0.0,         0.0);
+< 		hD2[6] = MAGMA_Z_MAKE(0.0,         0.0);
+< 		hD2[7] = MAGMA_Z_MAKE(0.0,         0.0);
+< 		hD2[8] = MAGMA_Z_MAKE(ip.getDzz(), 0.0);
+< 		cudaMemcpy(D2, hD2, 9 * sizeof(magmaDoubleComplex), cudaMemcpyHostToDevice);
+< 
+< 		// 5. Build R2
+< 		gpu_zeroOutArray<<<1 + dimM2 / TPB_1D, TPB_1D>>>(dimM2, R2);
+< 		for (int a = 0; a < 3; ++a)
+< 		{
+< 			for (int b = 0; b < 3; ++b)
+< 				magmablas_zgeadd2(dimM, dimM, MAGMA_Z_MAKE(-MAGMA_Z_REAL(hD2[a + b * 3]), -MAGMA_Z_IMAG(hD2[a + b * 3])), &MM[(a * 3 + b) * dimM2], dimM, MAGMA_Z_ONE, R2, dimM, queue);
+< 		}
+< #ifdef DEBUG
+< 		magmaDoubleComplex *hR2;
+< 		TESTING_CHECK(magma_zmalloc_cpu(&hR2, dimM2));
+< 		cudaMemcpy(hR2, R2, dimM2 * sizeof(magmaDoubleComplex), cudaMemcpyDeviceToHost);
+< 		
+< 		std::cout << "******************************" << std::endl;
+< 		std::cout << "** R2(s=0) **" << std::endl;
+< 		for (int a = 0; a < dimM; ++a)
+< 		{
+< 			for (int b = 0; b < dimM; ++b)
+< 				std::cout << MAGMA_Z_REAL(hR2[a + b * dimM]) << std::showpos << MAGMA_Z_IMAG(hR2[a + b * dimM]) << "i\t";
+< 			std::cout << std::endl;
+< 		}
+< #endif // DEBUG
+< 	}
+< #else // END GPU
+< 	; // TODO: CPU CODE HERE
+< #endif // END CPU
+< 
+< 	int Ns;
+< 	double ds, freq, *smalljs;
+< #ifdef __GPU__
+< 	magmaDoubleComplex cFreq;
+< #else
+< 	F77complex cFreq;
+< #endif
+< 
+< 	if (!ip.getNMR())
+< 	{
+< 		Ns = ip.getNfreq();
+< 		ds = ip.getDeltafreq();
+< 	}
+< 	else
+< 	{
+< 		Ns = probe.getNLarmorFreq();
+< 		std::cout << "Ns: " << Ns << std::endl;
+< 		std::cout << probe.getLarmorFreq(0) << "  " << probe.getLarmorFreq(1) << "  " << probe.getLarmorFreq(2) << "  " << probe.getLarmorFreq(3) << "  " << probe.getLarmorFreq(4) << std::endl;
+< 		smalljs = new double[9];
+< 	}
+< 
+< 	// ALLOCATE AND/OR COPY USEFUL DATA TO GPU
+< 	t1 = high_resolution_clock::now(); // TIMER10: SETUP THE CYCLE OVER FREQUENCIES
+< #ifdef __GPU__
+< 	magmaDoubleComplex *dWeig;
+< 	TESTING_CHECK(magma_zmalloc(&dWeig, nk));
+< 	cudaMemcpy(dWeig, weig, nk * sizeof(magmaDoubleComplex), cudaMemcpyHostToDevice);
+< 
+< 	magmaDoubleComplex *dWm, *dWp;
+< 	TESTING_CHECK(magma_zmalloc(&dWm, 3 * nk));
+< 	TESTING_CHECK(magma_zmalloc(&dWp, 3 * nk));
+< 	cudaMemcpy(dWm, wm, 3 * nk * sizeof(magmaDoubleComplex), cudaMemcpyHostToDevice);
+< 	cudaMemcpy(dWp, wp, 3 * nk * sizeof(magmaDoubleComplex), cudaMemcpyHostToDevice);
+< 
+< 	magmaDoubleComplex *dF1, *dF2, *dF11, *dCpq;
+< 	TESTING_CHECK(magma_zmalloc(&dF1, nk));
+< 	TESTING_CHECK(magma_zmalloc(&dF2, nk));
+< 	TESTING_CHECK(magma_zmalloc(&dF11, (nk * (nk - 1))/2));
+< 	TESTING_CHECK(magma_zmalloc(&dCpq, nk * nk));
+< 
+< 	// stuff for calculating Js
+< 	int *Rs_ipiv = new int[dimM];
+< 	int dRs_lwork = dimM * magma_get_zgetri_nb(dimM);
+< 	magmaDoubleComplex *dRs_dwork;
+< 	TESTING_CHECK(magma_zmalloc(&dRs_dwork, dRs_lwork));
+< 	int info_Rs_inv;
+< 
+< #else // END GPU CODE
+< 	// TODO: needed allocations for CPU code
+< #endif // END CPU CODE
+< 	t2 = high_resolution_clock::now(); // TIMER10
+< 	ms_double = t2 - t1;
+< 	timesFileStr << "Setup of the cycle over frequencies (CPU-GPU data exchange): " << std::scientific << ms_double.count() *1.0e-3 << " s\n";
+< 
+< 	// CYCLE OVER FREQUENCIES
+< 
+< 	timesFileStr << "\n----- Timing of the functions in the cycle over frequencies (" << Ns << " points) -----\n\n";
+< 	for (int s = 0; s < Ns; ++s)
+< 	{
+< 		freq = ip.getNMR() ? probe.getLarmorFreq(s) * 1.0e-15 : (double)s * ds;
+< 		cFreq = MAGMA_Z_MAKE(0, freq);
+< 
+< 		std::cout << "Frequency: " << s+1 << " / " << Ns << std::endl;
+< #ifdef __GPU__
+< 		if (ip.getRigidBody())
+< 		{
+< 			// 7. Build [s1 + R(s)] using Pade approximant
+< 			threadsPerBlock.x = threadsPerBlock.y = TPB_2D;
+< 			numBlocks.x = numBlocks.y = 1 + dimM / threadsPerBlock.x;
+< 			gpu_makeRs<<<numBlocks, threadsPerBlock>>>(dimM, cFreq, R2, NULL, Rs, 0);
+< 
+< 		} // End rigid body IF
+< 		else
+< 		{
+< 			// 3. Build D2(s)
+< 
+< 			/* Build F1(s) */
+< 			t1 = high_resolution_clock::now(); // TIMER11: COMPUTATION OF D2
+< 			gpu_build_F1<<<1 + nk / TPB_1D, TPB_1D>>>(nk, cFreq, dWeig, dF1);
+< 			threadsPerBlock.x = threadsPerBlock.y = TPB_2D;
+< 			numBlocks.x = 1 + 3 / threadsPerBlock.x;
+< 			numBlocks.y = 1 + nk / threadsPerBlock.y;
+< 			gpu_F1_times_wp_tr<<<numBlocks, threadsPerBlock>>>(nk, dF1, dWp, tmpMatrix);
+< 			magma_zgemm(NoTrans, Trans, 3, 3, nk, MAGMA_Z_ONE, dWm, 3, tmpMatrix, 3, MAGMA_Z_ZERO, D2, 3, queue); // D2 COLUM WISE.
+< 			t2 = high_resolution_clock::now(); // TIMER11
+< 			ms_double = t2 - t1;
+< 			timesFileStr << "Build of D2(" << s << "): " << std::scientific << ms_double.count() *1.0e-3 << " s\n";
+< 
+< 			// 4. Build D4(s)
+< 
+< 			auto t4 = high_resolution_clock::now();
+< 			gpu_build_F2<<<1 + nk / TPB_1D, TPB_1D>>>(nk, cFreq, dWeig, dF2);
+< 			gpu_build_F11<<<1 + ((nk*(nk-1))/2) / TPB_1D, TPB_1D>>>(nk, ((nk*(nk-1))/2), cFreq, dWeig, dF11);
+< 
+< 			t3 = high_resolution_clock::now(); // TIMER12: COMPUTATION OF D4
+< 			for (int ia = 0; ia < 3; ++ia)
+< 			{
+< 				for (int ib = 0; ib < 3; ++ib)
+< 				{
+< 					t1 = high_resolution_clock::now(); // TIMER13: COMPUTATION OF D4_a,b
+< 					for (int ig = 0; ig < 3; ++ig)
+< 					{
+< 						for (int id = 0; id < 3; ++id)
+< 						{
+< 							gpu_Sum_A<<<D4_A_num_blocks, D4_block_size, D4_smem_sz>>>(ia,ib,ig,id,nk,dWm,dWp,dF1, dF2, dD4A);
+< 							gpu_block_sum<<<1, D4_block_size, D4_smem_sz>>>(dD4A, dD4A + D4_A_num_blocks, D4_A_num_blocks);
+< 							gpu_Sum_B<<<D4_B_num_blocks, D4_block_size, D4_smem_sz>>>(ia,ib,ig,id,nk,((nk*(nk-1))/2),dWm,dWp,dF1, dF11, dD4B);
+< 							gpu_block_sum<<<1, D4_block_size, D4_smem_sz>>>(dD4B, dD4B + D4_B_num_blocks, D4_B_num_blocks);
+< 							cudaMemcpy(hD4A, dD4A + D4_A_num_blocks, sizeof(magmaDoubleComplex), cudaMemcpyDeviceToHost);
+< 							cudaMemcpy(hD4B, dD4B + D4_B_num_blocks, sizeof(magmaDoubleComplex), cudaMemcpyDeviceToHost);
+< 							hD4[ia + ib * 3 + ig * 9 + id * 27] = MAGMA_Z_ADD(hD4A[0], hD4B[0]);
+< 						}
+< 					}
+< 					t2 = high_resolution_clock::now(); // TIMER13
+< 					ms_double = t2 - t1;
+< 					timesFileStr << "Build of D4_"<<ia<<","<<ib<<"(" << s << "): " << std::scientific << ms_double.count() *1.0e-3 << " s\n";
+< 				}
+< 			}
+< 			t4 = high_resolution_clock::now(); // TIMER12
+< 			ms_double = t4 - t3;
+< 			timesFileStr << "Total time to build of D4(" << s << "): " << std::scientific << ms_double.count() *1.0e-3 << " s\n";
+< 
+< 			cudaMemcpy(hD2, D2,  9 * sizeof(magmaDoubleComplex), cudaMemcpyDeviceToHost);
+< 			cudaMemcpy(D4, hD4, 81 * sizeof(magmaDoubleComplex), cudaMemcpyHostToDevice);
+< #ifdef OUTPUT_D
+< 			fD2 << freq << "\t";
+< 			fD4 << freq << "\t";
+< 			for (int ia = 0; ia < 3; ++ia)
+< 			{
+< 				for (int ib = 0; ib < 3; ++ib)
+< 				{
+< 					fD2 << MAGMA_Z_REAL(hD2[ia + ib * 3]) << std::showpos << MAGMA_Z_IMAG(hD2[ia + ib * 3]) << "i\t";
+< 					for (int ig = 0; ig < 3; ++ig)
+< 					{
+< 						for (int id = 0; id < 3; ++id)
+< 							fD4 << MAGMA_Z_REAL(hD4[ia + ib * 3 + ig * 9 + id * 27]) << std::showpos << MAGMA_Z_IMAG(hD4[ia + ib * 3 + ig * 9 + id * 27]) << "i\t";
+< 					}
+< 				}
+< 			}
+< 			fD2 << std::endl;
+< 			fD4 << std::endl;
+< #endif
+< 
+< 			// 5. Build R2(s)
+< 			t1 = high_resolution_clock::now(); // TIMER14: BUILD OF R2(s)
+< 			gpu_zeroOutArray<<<1 + dimM2 / TPB_1D, TPB_1D>>>(dimM2, R2);
+< 
+< 			for (int a = 0; a < 3; ++a)
+< 			{
+< 				for (int b = 0; b < 3; ++b)
+< 					magmablas_zgeadd2(dimM, dimM, MAGMA_Z_MAKE(-MAGMA_Z_REAL(hD2[a + b * 3]), -MAGMA_Z_IMAG(hD2[a + b * 3])), &MM[(a * 3 + b) * dimM2], dimM, MAGMA_Z_ONE, R2, dimM, queue);
+< 			}
+< #ifdef DEBUG
+< 			if (s <= 10)
+< 			{
+< 				magmaDoubleComplex *hR2;
+< 				TESTING_CHECK(magma_zmalloc_cpu(&hR2, dimM2));
+< 				cudaMemcpy(hR2, R2, dimM2 * sizeof(magmaDoubleComplex), cudaMemcpyDeviceToHost);
+< 				
+< 				std::cout << "******************************" << std::endl;
+< 				std::cout << "** R2(s=0) **" << std::endl;
+< 				for (int a = 0; a < dimM; ++a)
+< 				{
+< 					for (int b = 0; b < dimM; ++b)
+< 						std::cout << MAGMA_Z_REAL(hR2[a + b * dimM]) << std::showpos << MAGMA_Z_IMAG(hR2[a + b * dimM]) << "i\t";
+< 					std::cout << std::endl;
+< 				}
+< 			}
+< #endif // DEBUG
+< 			t2 = high_resolution_clock::now(); // TIMER14
+< 			ms_double = t2 - t1;
+< 			timesFileStr << "Build of R2(" << s << "): " << std::scientific << ms_double.count() *1.0e-3 << " s\n";
+< 
+< 			// 6. Build R4(s)
+< 			t1 = high_resolution_clock::now(); // TIMER15
+< 			gpu_zeroOutArray<<<1 + dimM2 / TPB_1D, TPB_1D>>>(dimM2, R4);
+< 			for (int ia = 0; ia < 3; ++ia)
+< 			{
+< 				for (int ib = 0; ib < 3; ++ib)
+< 				{
+< 					for (int ig = 0; ig < 3; ++ig)
+< 					{
+< 						for (int id = 0; id < 3; ++id)
+< 							magma_zgemm(NoTrans, NoTrans, dimM, dimM, dimM, MAGMA_Z_MAKE(-MAGMA_Z_REAL(hD4[ia + ib * 3 + ig * 9 + id * 27]), -MAGMA_Z_IMAG(hD4[ia + ib * 3 + ig  * 9 + id * 27])), &MM[(ia * 3 + ib) * dimM2], dimM, &MM[(ig * 3  + id) * dimM2], dimM, MAGMA_Z_ONE, R4, dimM, queue);
+< 					}
+< 				}
+< 			}
+< 			t2 = high_resolution_clock::now(); // TIMER15
+< 			ms_double = t2 - t1;
+< 			timesFileStr << "Build of R4(" << s << "): " << std::scientific << ms_double.count() *1.0e-3 << " s\n";
+< 
+< 
+< #ifdef DEBUG
+< 			if (s <= 10)
+< 			{
+< 				magmaDoubleComplex *hR4;
+< 				TESTING_CHECK(magma_zmalloc_cpu(&hR4, dimM2));
+< 				cudaMemcpy(hR4, R4, dimM2 * sizeof(magmaDoubleComplex), cudaMemcpyDeviceToHost);
+< 				
+< 				std::cout << "******************************" << std::endl;
+< 				std::cout << "** R4(s=0) **" << std::endl;
+< 				for (int a = 0; a < dimM; ++a)
+< 				{
+< 					for (int b = 0; b < dimM; ++b)
+< 						std::cout <<  MAGMA_Z_REAL(hR4[a + b * dimM]) << std::showpos << MAGMA_Z_IMAG(hR4[a + b * dimM]) << "i\t";
+< 					std::cout << std::endl;
+< 				}
+< 			}
+< #endif // DEBUG
+< 
+< 			// 7. Build [s1 + R(s)]
+< 			threadsPerBlock.x = threadsPerBlock.y = TPB_2D;
+< 			numBlocks.x = numBlocks.y = 1 + dimM / threadsPerBlock.x;
+< 			gpu_makeRs<<<numBlocks, threadsPerBlock>>>(dimM, cFreq, R2, R4, Rs, 1);
+< 
+< 
+< 		} // SRB
+< 
+< 		// 8. Calculate spectral densities
+< 		t1 = high_resolution_clock::now(); // TIMER16: SPECTRAL DENSITIES
+< 		magma_zgetrf_gpu(dimM, dimM, Rs, dimM, Rs_ipiv, &info_Rs_inv);
+< 		magma_zgetri_gpu(dimM, Rs, dimM, Rs_ipiv, dRs_dwork, dRs_lwork, &info_Rs_inv);
+< 
+< 		cudaMemcpy(Js, Rs, dimM2 * sizeof(magmaDoubleComplex), cudaMemcpyDeviceToHost);
+< 		fJs << freq << "\t";
+< 		for (int r = 0; r < dimM; ++r)
+< 		{
+< 			for (int c = 0; c < dimM; ++c)
+< 				fJs << MAGMA_Z_REAL(Js[r + c * dimM]) << std::showpos << MAGMA_Z_IMAG(Js[r + c * dimM]) << "i\t";
+< 		}
+< 		fJs << std::endl;
+< 
+< 		// Update NMR module if required
+< 		if (ip.getNMR())
+< 		{
+< 			smalljs[0] = 1.0e-15 * MAGMA_Z_REAL(Js[2 + 2 * dimM]);
+< 			smalljs[1] = 1.0e-15 * MAGMA_Z_REAL(Js[3 + 3 * dimM]);
+< 			smalljs[2] = 1.0e-15 * MAGMA_Z_REAL(Js[4 + 4 * dimM]);
+< 			smalljs[3] = 1.0e-15 * MAGMA_Z_REAL(Js[0 + 4 * dimM]);
+< 			smalljs[4] = 1.0e-15 * MAGMA_Z_REAL(Js[1 + 3 * dimM]);
+< 			smalljs[5] = 1.0e-15 * MAGMA_Z_REAL(Js[1 + 4 * dimM]);
+< 			smalljs[6] = 1.0e-15 * MAGMA_Z_REAL(Js[2 + 3 * dimM]);
+< 			smalljs[7] = 1.0e-15 * MAGMA_Z_REAL(Js[2 + 4 * dimM]);
+< 			smalljs[8] = 1.0e-15 * MAGMA_Z_REAL(Js[3 + 4 * dimM]);
+< 			probe.setSmallJs(smalljs, s);
+< 		}
+< 		t2 = high_resolution_clock::now(); // TIMER16
+< 		ms_double = t2 - t1;
+< 		timesFileStr << "Calculation of spectral densities: " << std::scientific << ms_double.count() *1.0e-3 << " s\n\n";
+< #else
+< 	; // TODO: CPU CODE
+< #endif
+< 	}
+< 	timesFileStr << "----- End of cycle over frequencies -----\n\n";
+< 
+< #ifdef OUTPUT_D
+< 	fD2.close();
+< 	fD4.close();
+< #endif
+< 	fJs.close();
+< 
