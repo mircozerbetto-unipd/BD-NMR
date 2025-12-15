@@ -1,5 +1,5 @@
 ***************
-* BD-NMR v1.0 *
+* BD-NMR v1.0
 ***************
 
 Brownian Dynamics NMR (BD-NMR) is a suite of programs developed by Mirco Zerbetto, Sergio Rampino, and Antonino Polimeno
@@ -20,7 +20,7 @@ BD-NMR merges the interpretative power of stochastic modeling with the simplicit
 framework that is similar to that of standard molecular dynamics simulations.
 
 ****************
-* Installation *
+* Installation
 ****************
 
 1. Edit the install.sh file and make the necessary changes to these environment variables:
@@ -43,7 +43,7 @@ framework that is similar to that of standard molecular dynamics simulations.
 
 
 *********
-* Usage *
+* Usage
 *********
 
 The calculation is divided in 6 steps.
