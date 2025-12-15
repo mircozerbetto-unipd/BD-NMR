@@ -1,0 +1,18 @@
+project 2ala
+refAtoms 17 13 3 4
+
+ff amber99sb
+grad 0.01
+
+Reff 2.0
+C 6.0
+viscosity 8.94e-4
+temperature 298.15
+
+seed 123456789
+
+nucleus 15N1H
+bondLength 1.015
+deltaCSA -169.
+frequency 600.322 800.429
+calculate T1 T2 NOE

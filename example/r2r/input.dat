@@ -1,0 +1,18 @@
+project r2r
+refAtoms 39 8 15 3
+
+ff mm3
+grad 0.01
+
+Reff 1.4
+C 6.0
+viscosity 0.00219
+temperature 298.15
+
+seed 123456789
+
+nucleus 13C1H
+bondLength 1.13
+deltaCSA 0.
+frequency 600.132 699.973
+calculate T1 T2 NOE

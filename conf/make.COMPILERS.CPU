@@ -1,0 +1,6 @@
+# GCC >= 9 must be used
+CC      = gcc
+CPP     = g++
+F77     = gfortran
+
+COMPOPT = -O3 -funroll-loops -std=c++17 -DADD_ 

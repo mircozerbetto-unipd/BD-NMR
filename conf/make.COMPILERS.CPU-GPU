@@ -1,0 +1,10 @@
+# GCC version must be compatible to NVCC
+# Old versions of GCC can be safely used
+CC      = gcc
+CPP     = g++
+F77     = gfortran
+NVCC	= nvcc
+
+# Compiler flags
+COMPOPT = -O3 -funroll-loops -std=c++11 -DADD_ 
+CUDAOPT = -O3 -std=c++11 -DADD_ 
